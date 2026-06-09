@@ -32,6 +32,10 @@ pub(super) fn render_into(output: &mut String, docstring: &str) {
 /// allowing Markdown to interpret fragment-relative block structure such as
 /// nested lists and indented code blocks. [`render_into`] instead preserves
 /// indentation for display only.
+///
+/// Link eligibility still uses absolute source indentation: a non-pending line
+/// indented by four or more spaces is treated as code without subtracting an
+/// enclosing list item's content indentation.
 pub(super) fn render_fragment_into(output: &mut String, fragment: &str) {
     render_with_indentation_mode(output, fragment, LeadingIndentation::MarkdownSyntax);
 }
@@ -43,6 +47,10 @@ pub(super) fn render_fragment_into(output: &mut String, fragment: &str) {
 /// This function treats leading ASCII spaces as indentation. The indentation
 /// mode only applies outside recognized code blocks; code-block indentation
 /// always remains ordinary spaces.
+///
+/// Code-block recognition uses the existing line-oriented scanner. Rendering reST
+/// hyperlinks does not extend it with Markdown container parsing, such as recognizing
+/// a fence that follows a list marker on the same line.
 ///
 /// The general approach here is:
 ///
@@ -83,6 +91,10 @@ fn render_with_indentation_mode(
     // cross-linking. (Similar to `TypeDetails` in the type formatting code.)
     let mut first_line = true;
     let mut renderer = Renderer::new(output);
+    // Introducing a second link inside existing Markdown link syntax can make
+    // the original link invalid. Ambiguous fragments retain the pre-hyperlink
+    // behavior instead of requiring a complete Markdown inline parser here.
+    let render_rst_links = source.contains('`') && !contains_likely_markdown_link_syntax(source);
     let mut temp_owned_line;
     for line in source.lines() {
         // We can assume leading whitespace has been normalized
@@ -196,6 +208,10 @@ fn render_with_indentation_mode(
                     | "versionchanged" | "version-changed" | "version-deprecated" | "deprecated"
                     | "version-removed" | "versionremoved",
                 ) => {
+                    // A directive starts a new block and cannot continue a
+                    // pending hyperlink from the previous line.
+                    renderer.flush_pending_link();
+
                     // Map version directives to human-readable phrases (matching Sphinx output)
                     let pretty_directive = match directive.unwrap() {
                         "versionadded" | "version-added" => Cow::Borrowed("Added in version"),
@@ -245,9 +261,28 @@ fn render_with_indentation_mode(
             continue;
         }
 
-        renderer.render_line(rendered_line);
+        let render_line_links = if renderer.block_state.is_code() {
+            false
+        } else {
+            let is_indented_markdown_code =
+                matches!(leading_indentation, LeadingIndentation::MarkdownSyntax)
+                    && line_indent >= TextSize::from(4)
+                    && !renderer.inline.has_pending_link();
+            render_rst_links && !is_indented_markdown_code
+        };
+        renderer.render_line(rendered_line, line_indent.to_usize(), render_line_links);
     }
     renderer.finish_document();
+}
+
+/// Conservatively identifies Markdown links and reference definitions.
+fn contains_likely_markdown_link_syntax(input: &str) -> bool {
+    input.contains("](")
+        || input.contains("][")
+        || input.contains("]:")
+            && input
+                .lines()
+                .any(|line| line.trim_start().starts_with('[') && line.contains("]:"))
 }
 
 /// How to emit leading indentation outside recognized code blocks.
@@ -263,6 +298,7 @@ enum LeadingIndentation {
 struct Renderer<'source, 'output> {
     line_prefix: LinePrefix,
     block_state: BlockState<'source>,
+    inline: inline::Renderer,
     output: &'output mut String,
 }
 
@@ -271,6 +307,7 @@ impl<'source, 'output> Renderer<'source, 'output> {
         Self {
             line_prefix: LinePrefix::default(),
             block_state: BlockState::default(),
+            inline: inline::Renderer::default(),
             output,
         }
     }
@@ -289,7 +326,13 @@ impl<'source, 'output> Renderer<'source, 'output> {
 
     /// Flushes content buffered for the current line.
     fn flush_pending_line(&mut self) {
+        self.inline.flush_pending_link(self.output);
         self.line_prefix.emit(self.output);
+    }
+
+    /// Flushes a wrapped hyperlink candidate.
+    fn flush_pending_link(&mut self) {
+        self.inline.flush_pending_link(self.output);
     }
 
     fn finish_rest_literal(&mut self) {
@@ -341,12 +384,12 @@ impl<'source, 'output> Renderer<'source, 'output> {
         self.output.push_str(line);
     }
 
-    fn render_line(&mut self, line: &str) {
-        self.flush_pending_line();
+    fn render_line(&mut self, line: &str, source_indentation: usize, render_rst_links: bool) {
         if self.block_state.is_code() {
+            self.flush_pending_line();
             self.output.push_str(line);
         } else {
-            inline::render_line(self.output, line);
+            self.render_inline(line, source_indentation, render_rst_links);
         }
     }
 
@@ -363,6 +406,20 @@ impl<'source, 'output> Renderer<'source, 'output> {
                 self.output.push_str(fence.marker());
             }
         }
+    }
+
+    fn render_inline(&mut self, text: &str, source_indentation: usize, render_rst_links: bool) {
+        let line = inline::Line {
+            rendered_prefix: &self.line_prefix.rendered,
+            source_indentation,
+            text,
+        };
+        if render_rst_links {
+            self.inline.render_line(self.output, line);
+        } else {
+            self.inline.render_line_without_links(self.output, line);
+        }
+        self.line_prefix.rendered.clear();
     }
 }
 
