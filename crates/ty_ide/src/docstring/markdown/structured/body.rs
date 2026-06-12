@@ -1,10 +1,12 @@
+use std::borrow::Cow;
+
 use crate::docstring::document::preformatted::PreformattedBlockScanner;
 use crate::docstring::document::syntax::{ParsedLine, indentation, strip_code_span_wrapper};
 
 use super::{SectionItem, SectionKind};
 
 pub(super) struct SectionItemBuilder<'a> {
-    display_name: Option<&'a str>,
+    display_name: Option<Cow<'a, str>>,
     ty: Option<&'a str>,
     inline_description: Option<&'a str>,
     continuation_lines: Vec<&'a str>,
@@ -18,7 +20,7 @@ impl<'a> SectionItemBuilder<'a> {
     ) -> Self {
         let inline_description = inline_description.trim();
         Self {
-            display_name,
+            display_name: display_name.map(Cow::Borrowed),
             ty: ty.map(strip_code_span_wrapper),
             inline_description: (!inline_description.is_empty()).then_some(inline_description),
             continuation_lines: Vec::new(),
@@ -27,7 +29,11 @@ impl<'a> SectionItemBuilder<'a> {
 
     pub(super) fn finish(self, kind: SectionKind) -> SectionItem {
         let description = self.description_source();
-        SectionItem::new(kind, self.display_name, self.ty, description)
+        SectionItem::new(kind, self.display_name.as_deref(), self.ty, description)
+    }
+
+    pub(super) fn set_display_name(&mut self, display_name: impl Into<String>) {
+        self.display_name = Some(Cow::Owned(display_name.into()));
     }
 
     pub(super) fn push_description(&mut self, line: &'a str) {
@@ -104,7 +110,7 @@ fn parse_named_items_impl<'a>(
             && preformatted.consume_preformatted_line(line.text)
         {
             if !line.text.trim().is_empty()
-                && item_indent.is_some_and(|indent| indentation(line.text) < indent)
+                && item_indent.is_some_and(|indent| indentation(line.text) <= indent)
             {
                 return None;
             }

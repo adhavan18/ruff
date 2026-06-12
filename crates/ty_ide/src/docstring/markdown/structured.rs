@@ -9,6 +9,7 @@ use crate::docstring::document::preformatted::MarkdownFence;
 
 mod body;
 mod google;
+mod numpy;
 mod rst;
 
 /// Renders a docstring as Markdown.
@@ -18,6 +19,7 @@ mod rst;
 pub(super) fn render_into(output: &mut String, source: &str) {
     let mut sections = rst::structured_sections(source);
     sections.extend(google::structured_sections(source));
+    sections.extend(numpy::structured_sections(source));
     render_sections_into(output, source, sections);
 }
 
@@ -1311,6 +1313,195 @@ Args:
                 );
             }
         }
+    }
+
+    #[test]
+    fn numpy_sections_render_markdown_sections() {
+        let docstring = "\
+Summary.
+
+Parameters
+----------
+value, alias : str
+    The value.
+other
+    Another value.
+
+Other Parameters
+----------------
+kw_only : str, optional
+    Less common option.
+
+Returns
+-------
+    result : bool
+        Whether validation passed.
+
+Yields
+------
+    int
+        Next value.
+";
+        assert_snapshot!(render_docstring(docstring), @r"
+        Summary.
+
+        ## Parameters
+        **value, alias**: `str`  
+        The value.
+
+        **other**  
+        Another value.
+
+        ## Other Parameters
+        **kw\_only**: `str, optional`  
+        Less common option.
+
+        ## Returns
+        **result**: `bool`  
+        Whether validation passed.
+
+        ## Yields
+        `int`  
+        Next value.
+        ");
+
+        let docstring = "\
+Summary.
+
+Parameters
+----------
+value: str
+    The value.
+
+Returns
+-------
+result: bool
+    Whether validation passed.
+
+Yields
+------
+item: int
+    Next value.
+";
+        assert_snapshot!(render_docstring(docstring), @"
+        Summary.
+
+        ## Parameters
+        **value**: `str`  
+        The value.
+
+        ## Returns
+        **result**: `bool`  
+        Whether validation passed.
+
+        ## Yields
+        **item**: `int`  
+        Next value.
+        ");
+
+        let docstring = "\
+Summary.
+
+Returns
+-------
+    :obj:`list` of :obj:`str`
+        Primary values.
+    list of node-like
+        Related nodes.
+
+Yields
+------
+    :class:`Iterator` of :obj:`str`
+        Next labels.
+";
+        assert_snapshot!(render_docstring(docstring), @"
+        Summary.
+
+        ## Returns
+        `` :obj:`list` of :obj:`str` ``  
+        Primary values.
+
+        `list of node-like`  
+        Related nodes.
+
+        ## Yields
+        `` :class:`Iterator` of :obj:`str` ``  
+        Next labels.
+        ");
+
+        let docstring = "\
+Parameters
+----------
+value : str
+    Example::
+        ```
+other : int
+    Another value.
+";
+        assert_snapshot!(render_docstring(docstring), @"
+        ## Parameters
+        **value**: `str`  
+        Example:
+
+        ```````````python
+            ```
+        ```````````
+
+        **other**: `int`  
+        Another value.
+        ");
+    }
+
+    #[test]
+    fn unsupported_numpy_sections_stay_raw() {
+        for docstring in [
+            "\
+Summary.
+
+Returns
+-------
+    The created object.
+",
+            "\
+Summary.
+
+Returns
+-------
+
+Notes
+-----
+Not a return value.
+",
+            "\
+Summary.
+
+Parameters
+----------
+value : str
+    Example:
+    ```python
+other : str
+    ```
+other : int
+    Real parameter.
+",
+        ] {
+            assert_eq!(render_docstring(docstring), render_general(docstring));
+        }
+    }
+
+    #[test]
+    fn indented_numpy_sections_stay_raw() {
+        let docstring = "\
+Summary.
+
+    Parameters
+    ----------
+    other : str
+        Another value.
+";
+
+        assert_eq!(render_docstring(docstring), render_general(docstring));
     }
 
     #[test]
