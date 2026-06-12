@@ -485,8 +485,6 @@ pub(in crate::docstring) fn is_dotted_identifier(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use indexmap::IndexMap;
-
     use super::{SectionKind, parameter_documentation, visit_sections};
 
     #[test]
@@ -648,7 +646,7 @@ Summary.
     Args:
         value: Parameter documentation.",
         ] {
-            let parameters = super::super::parameter_documentation(raw, IndexMap::default());
+            let parameters = super::super::parameter_documentation(raw);
 
             assert_eq!(parameters.len(), 1, "{raw}");
             assert_eq!(
