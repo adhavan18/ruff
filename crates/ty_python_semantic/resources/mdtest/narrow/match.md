@@ -1130,7 +1130,7 @@ def test_mapping_value_or_alias_preserves_typevar(
         case _:
             raise AssertionError
 
-def test_match_dict_bindings(value: dict[str, int]) -> None:
+def test_match_dict_alias_preserves_concrete_type(value: dict[str, int]) -> None:
     match value:
         case {"item": item, **rest} as whole:
             reveal_type(whole)  # revealed: dict[str, int]
