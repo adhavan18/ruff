@@ -284,10 +284,13 @@ enum OriginalSubjectPreservation {
     TypeVariablesOnly,
 }
 
-/// Controls whether pattern success analysis also records the names bound by the pattern.
+/// Controls which results pattern success analysis computes.
 ///
-/// Subject narrowing only needs the type that reaches the case body. Binding inference uses the
-/// same structural walk, but also records the type assigned to each capture and alias.
+/// Subject narrowing only needs the type that reaches the case body, so it skips binding
+/// collection. It also analyzes every OR-pattern alternative against the original subject because
+/// the complete set of successful values does not depend on alternative order. Binding inference
+/// instead excludes values definitely matched by an earlier alternative before inferring bindings
+/// for a later one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PatternAnalysisMode {
     Bindings,
