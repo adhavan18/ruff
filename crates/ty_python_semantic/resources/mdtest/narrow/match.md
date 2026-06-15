@@ -1353,10 +1353,10 @@ def test_required_typed_dict_key_excludes_fallback_binding(
 
 ## Narrowing the match subject
 
-When a class or mapping pattern succeeds, it can narrow the original match subject even if the
-pattern does not bind a name for the whole value. Nested patterns can remove union members, and an
-`or` pattern combines the possibilities from its alternatives. When only some constraints of a type
-variable can match, the narrowed subject keeps the original type variable in an intersection.
+When a class, mapping, or sequence pattern succeeds, it can narrow the original match subject even
+if the pattern does not bind a name for the whole value. Nested patterns can remove union members,
+and an `or` pattern combines the possibilities from its alternatives. When only some constraints of
+a type variable can match, the narrowed subject keeps the original type variable in an intersection.
 
 ```py
 from typing import Any, Generic, Literal, TypeVar, final
@@ -1499,6 +1499,15 @@ def test_match_mapping_does_not_narrow_tuple_display_element(
             # TODO: This should reveal `IntPayload`. Mapping patterns do not yet narrow values used
             # inside tuple display subjects.
             reveal_type(value)  # revealed: IntPayload | StrPayload
+
+def test_match_value_does_not_narrow_dictionary_display_element(
+    value: Literal["int", "str"],
+) -> None:
+    match {"tag": value}:
+        case {"tag": "int"}:
+            # TODO: This should reveal `Literal["int"]`. Value patterns do not yet narrow values
+            # used inside dictionary display subjects.
+            reveal_type(value)  # revealed: Literal["int", "str"]
 
 def test_match_mapping_does_not_narrow_dictionary_display_element(
     value: IntPayload | StrPayload,
