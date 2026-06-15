@@ -1412,6 +1412,16 @@ def test_match_self_child_narrows_subject(value: bool) -> Literal[True]:
         case _:
             raise AssertionError
 
+def test_match_self_mutable_sequence_narrowing_can_become_stale(
+    value: list[int | str],
+) -> None:
+    match value:
+        case list([int(), str()]):
+            value.reverse()
+            # TODO: As with a direct sequence pattern, mutation does not invalidate the element
+            # types established when the pattern matched.
+            reveal_type(value[0])  # revealed: int
+
 ConstrainedPayloadT = TypeVar(
     "ConstrainedPayloadT",
     TaggedPayload[Literal["int"], int],
