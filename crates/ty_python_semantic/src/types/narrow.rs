@@ -1919,7 +1919,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             for binding in arm_bindings.values_mut() {
                 let subject_ty = binding.subject_ty(self.db);
                 if !subject_ty.is_never() {
-                    binding.restore_subject(self.matched_subject_type_for_original(
+                    binding.restore_subject(self.preserve_original_subject_type(
                         original_subject_ty,
                         subject_ty,
                         preservation,
@@ -1928,12 +1928,12 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             }
             Self::merge_bindings(&mut bindings, arm_bindings);
 
-            matched_subject_types.add_in_place(self.matched_subject_type_for_original(
+            matched_subject_types.add_in_place(self.preserve_original_subject_type(
                 original_subject_ty,
                 matched_types.build(),
                 preservation,
             ));
-            binding_subject_types.add_in_place(self.matched_subject_type_for_original(
+            binding_subject_types.add_in_place(self.preserve_original_subject_type(
                 original_subject_ty,
                 binding_types.build(),
                 preservation,
@@ -1947,22 +1947,22 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         }
     }
 
-    fn matched_subject_type_for_original(
+    fn preserve_original_subject_type(
         &self,
         original_subject_ty: Type<'db>,
-        matched_types: Type<'db>,
+        filtered_ty: Type<'db>,
         preservation: OriginalSubjectPreservation,
     ) -> Type<'db> {
-        let filtering_types = self.pattern_filtering_type(original_subject_ty);
-        if matched_types.is_equivalent_to(self.db, filtering_types)
+        let filtering_ty = self.pattern_filtering_type(original_subject_ty);
+        if filtered_ty.is_equivalent_to(self.db, filtering_ty)
             && (matches!(preservation, OriginalSubjectPreservation::EquivalentTypes)
                 || original_subject_ty.has_typevar(self.db))
         {
             original_subject_ty
         } else if original_subject_ty.has_typevar(self.db) {
-            self.intersect_types(original_subject_ty, matched_types)
+            self.intersect_types(original_subject_ty, filtered_ty)
         } else {
-            matched_types
+            filtered_ty
         }
     }
 
