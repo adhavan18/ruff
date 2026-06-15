@@ -1418,8 +1418,8 @@ def test_match_self_mutable_sequence_narrowing_can_become_stale(
     match value:
         case list([int(), str()]):
             value.reverse()
-            # TODO: As with a direct sequence pattern, mutation does not invalidate the element
-            # types established when the pattern matched.
+            # TODO: Mutation should invalidate the indexed element types established while the
+            # pattern was evaluated. After reversing the list, value[0] should be str.
             reveal_type(value[0])  # revealed: int
 
 ConstrainedPayloadT = TypeVar(
