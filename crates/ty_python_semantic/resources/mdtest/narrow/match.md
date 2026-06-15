@@ -1404,6 +1404,14 @@ def test_match_class_narrows_subject(
         case TaggedPayload("int", _):
             reveal_type(value)  # revealed: TaggedPayload[Literal["int"], int]
 
+def test_match_self_child_narrows_subject(value: bool) -> Literal[True]:
+    match value:
+        case bool(True):
+            reveal_type(value)  # revealed: Literal[True]
+            return value
+        case _:
+            raise AssertionError
+
 ConstrainedPayloadT = TypeVar(
     "ConstrainedPayloadT",
     TaggedPayload[Literal["int"], int],
