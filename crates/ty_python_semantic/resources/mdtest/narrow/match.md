@@ -1351,6 +1351,157 @@ def test_required_typed_dict_key_excludes_fallback_binding(
             return item
 ```
 
+## Narrowing the match subject
+
+When a class or mapping pattern succeeds, it can narrow the original match subject even if the
+pattern does not bind a name for the whole value. Nested patterns can remove union members, and an
+`or` pattern combines the possibilities from its alternatives. When only some constraints of a type
+variable can match, the narrowed subject keeps the original type variable in an intersection.
+
+```py
+from typing import Any, Generic, Literal, TypeVar, final
+from typing_extensions import TypedDict
+from ty_extensions import Unknown
+
+TagT = TypeVar("TagT")
+PayloadT = TypeVar("PayloadT")
+
+class TaggedPayload(Generic[TagT, PayloadT]):
+    __match_args__ = ("tag", "payload")
+    tag: TagT
+    payload: PayloadT
+
+class GradualSubjectBox: ...
+
+def test_match_class_narrows_gradual_subjects(
+    any_value: Any,
+    unknown_value: Unknown,
+) -> None:
+    match any_value:
+        case GradualSubjectBox():
+            reveal_type(any_value)  # revealed: Any & GradualSubjectBox
+
+    match unknown_value:
+        case GradualSubjectBox():
+            reveal_type(unknown_value)  # revealed: Unknown & GradualSubjectBox
+
+def test_match_mapping_narrows_gradual_subjects(
+    any_value: Any,
+    unknown_value: Unknown,
+) -> None:
+    match any_value:
+        case {"key": _}:
+            reveal_type(any_value)  # revealed: Any & Top[Mapping[Unknown, object]]
+
+    match unknown_value:
+        case {"key": _}:
+            reveal_type(unknown_value)  # revealed: Unknown & Top[Mapping[Unknown, object]]
+
+def test_match_class_narrows_subject(
+    value: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str],
+) -> None:
+    match value:
+        case TaggedPayload("int", _):
+            reveal_type(value)  # revealed: TaggedPayload[Literal["int"], int]
+
+ConstrainedPayloadT = TypeVar(
+    "ConstrainedPayloadT",
+    TaggedPayload[Literal["int"], int],
+    TaggedPayload[Literal["str"], str],
+)
+
+def test_match_class_narrows_constrained_typevar_subject(value: ConstrainedPayloadT) -> None:
+    match value:
+        case TaggedPayload("int", _):
+            # revealed: ConstrainedPayloadT@test_match_class_narrows_constrained_typevar_subject & TaggedPayload[Literal["int"], int]
+            reveal_type(value)
+
+def test_match_class_or_pattern_narrows_subject(
+    value: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str] | TaggedPayload[Literal["bool"], bool],
+) -> None:
+    match value:
+        case TaggedPayload("int", _) | TaggedPayload("str", _):
+            # revealed: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str]
+            reveal_type(value)
+
+@final
+class SubjectChoiceA: ...
+
+@final
+class SubjectChoiceB: ...
+
+SubjectChoiceT = TypeVar("SubjectChoiceT", SubjectChoiceA, SubjectChoiceB)
+
+def test_match_class_or_pattern_preserves_constrained_typevar_subject(value: SubjectChoiceT | str) -> None:
+    match value:
+        case SubjectChoiceA() | SubjectChoiceB():
+            # revealed: SubjectChoiceT@test_match_class_or_pattern_preserves_constrained_typevar_subject
+            reveal_type(value)
+
+def test_match_sequence_narrows_tuple_element_subject(
+    value: tuple[Literal[1, 2]],
+) -> None:
+    match value:
+        case [1]:
+            reveal_type(value[0])  # revealed: Literal[1]
+
+@final
+class FinalWithoutRequestedAttribute: ...
+
+def test_missing_final_class_attribute_rejects_subject_alternative(
+    value: FinalWithoutRequestedAttribute | TaggedPayload[Literal["int"], int],
+) -> None:
+    match value:
+        case FinalWithoutRequestedAttribute(missing=_) | TaggedPayload("int", _):
+            reveal_type(value)  # revealed: TaggedPayload[Literal["int"], int]
+
+class IntPayload(TypedDict):
+    tag: Literal["int"]
+    value: int
+
+class StrPayload(TypedDict):
+    tag: Literal["str"]
+    value: str
+
+def test_match_mapping_narrows_subject(value: IntPayload | StrPayload) -> None:
+    match value:
+        case {"tag": "int"}:
+            reveal_type(value)  # revealed: IntPayload
+
+class PayloadContainer:
+    payload: IntPayload | StrPayload
+
+def mapping_pattern_narrows_attribute_subject(container: PayloadContainer) -> None:
+    match container.payload:
+        case {"tag": "int"}:
+            reveal_type(container.payload)  # revealed: IntPayload
+
+def test_nested_mapping_narrows_sequence_subject(
+    value: tuple[IntPayload] | tuple[StrPayload],
+) -> None:
+    match value:
+        case [{"tag": "int"}]:
+            reveal_type(value)  # revealed: tuple[IntPayload]
+
+def test_match_mapping_does_not_narrow_tuple_display_element(
+    value: IntPayload | StrPayload,
+) -> None:
+    match (value,):
+        case ({"tag": "int"},):
+            # TODO: This should reveal `IntPayload`. Mapping patterns do not yet narrow values used
+            # inside tuple display subjects.
+            reveal_type(value)  # revealed: IntPayload | StrPayload
+
+def test_match_mapping_does_not_narrow_dictionary_display_element(
+    value: IntPayload | StrPayload,
+) -> None:
+    match {"payload": value}:
+        case {"payload": {"tag": "int"}}:
+            # TODO: This should reveal `IntPayload`. Mapping patterns do not yet narrow values used
+            # inside dictionary display subjects.
+            reveal_type(value)  # revealed: IntPayload | StrPayload
+```
+
 ## Exhaustive positional patterns for built-in classes
 
 Python defines a fixed set of built-in classes whose single positional subpattern receives the
@@ -2701,11 +2852,21 @@ reveal_type(x)  # revealed: object
 When performing narrowing on `self` inside methods on enums, we take into account that `Self` might
 refer to a subtype of the enum class, like `Literal[Answer.YES]`. This is why we do not simplify
 `Self & ~Literal[Answer.YES]` to `Literal[Answer.NO, Answer.MAYBE]`. Otherwise, we wouldn't be able
-to return `self` in the `assert_yes` method below:
+to return `self` in the `assert_yes` method below. An unrelated type variable in the subject does
+not change this representation:
 
 ```py
 from enum import Enum
+from typing import TypeVar, final
 from typing_extensions import Self, assert_never
+
+@final
+class OtherA: ...
+
+@final
+class OtherB: ...
+
+OtherT = TypeVar("OtherT", OtherA, OtherB)
 
 class Answer(Enum):
     NO = 0
@@ -2760,6 +2921,11 @@ class Answer(Enum):
             case _:
                 reveal_type(self)  # revealed: Self@assert_yes & ~Literal[Answer.YES]
                 raise ValueError("Answer is not YES")
+
+    def mixed_typevar_subject(self, value: Self | OtherT) -> None:
+        match value:
+            case Answer.NO | Answer.MAYBE:
+                reveal_type(value)  # revealed: Self@mixed_typevar_subject
 
     def alias_through_alternatives(self) -> Self:
         match self:
