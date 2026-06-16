@@ -1914,7 +1914,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                         .as_ref()
                         .and_then(|name| analyzer.places().symbol_id(name.as_str()))
                 {
-                    analyzer.record_binding(
+                    Self::merge_binding(
                         &mut bindings,
                         place.into(),
                         PatternBindingTypes::extracted(
