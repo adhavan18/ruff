@@ -673,6 +673,16 @@ class CorrelatedB: ...
 class CorrelatedC: ...
 
 CorrelatedT = TypeVar("CorrelatedT", CorrelatedA, CorrelatedB)
+SequenceCorrelationT = TypeVar(
+    "SequenceCorrelationT",
+    tuple[int],
+    tuple[str],
+)
+PartialSequenceCorrelationT = TypeVar(
+    "PartialSequenceCorrelationT",
+    tuple[int],
+    tuple[int, int],
+)
 BoundedCorrelationT = TypeVar(
     "BoundedCorrelationT",
     bound=CorrelatedA | CorrelatedB,
@@ -681,6 +691,41 @@ Expansion0T = TypeVar("Expansion0T", CorrelatedA, CorrelatedB, CorrelatedC)
 Expansion1T = TypeVar("Expansion1T", CorrelatedA, CorrelatedB, CorrelatedC)
 Expansion2T = TypeVar("Expansion2T", CorrelatedA, CorrelatedB, CorrelatedC)
 Expansion3T = TypeVar("Expansion3T", CorrelatedA, CorrelatedB, CorrelatedC)
+
+def exhaustive_or_alias_preserves_typevar(value: CorrelatedT) -> CorrelatedT:
+    match value:
+        case (CorrelatedA() | CorrelatedB()) as whole:
+            reveal_type(whole)  # revealed: CorrelatedT@exhaustive_or_alias_preserves_typevar
+            return whole
+
+def exhaustive_or_alternative_alias_preserves_typevar(
+    value: CorrelatedT,
+) -> CorrelatedT:
+    match value:
+        case (CorrelatedA() as whole) | (CorrelatedB() as whole):
+            # revealed: CorrelatedT@exhaustive_or_alternative_alias_preserves_typevar
+            reveal_type(whole)
+            return whole
+
+def exhaustive_sequence_alias_preserves_typevar(
+    value: SequenceCorrelationT,
+) -> SequenceCorrelationT:
+    match value:
+        case [_] as whole:
+            # revealed: SequenceCorrelationT@exhaustive_sequence_alias_preserves_typevar
+            reveal_type(whole)
+            return whole
+
+def partial_sequence_alias_preserves_typevar(
+    value: PartialSequenceCorrelationT,
+) -> PartialSequenceCorrelationT:
+    match value:
+        case [_] as whole:
+            # revealed: PartialSequenceCorrelationT@partial_sequence_alias_preserves_typevar & tuple[int]
+            reveal_type(whole)
+            return whole
+        case _:
+            raise ValueError
 
 def repeated_typevar_uses_one_constraint(
     value: tuple[CorrelatedT, CorrelatedT],
