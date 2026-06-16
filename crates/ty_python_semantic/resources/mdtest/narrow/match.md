@@ -491,32 +491,31 @@ class Values(list[str]):
 def test_or_binding_keeps_values_that_can_fail_a_class_pattern(value: Values) -> None:
     match value:
         case (HasX() as item) | [item]:
-            # Class child bindings are added by a later change, so this branch cannot yet combine
-            # the supported whole-pattern alias with the sequence capture.
-            reveal_type(item)  # revealed: Unknown
+            reveal_type(item)  # revealed: Values | str
 ```
 
-Class and mapping child bindings are added by a later change. Until then, an `or` pattern that mixes
-one of those patterns with a supported alternative falls back to `Unknown` instead of inferring a
-type from only the supported alternative.
+Class and mapping child bindings combine with bindings from other alternatives:
 
 ```py
 from typing import final
-from ty_extensions import Unknown
+from typing_extensions import TypedDict
 
 @final
 class TextValue:
     value: str = ""
 
+class StringMapping(TypedDict):
+    value: str
+
 def class_or_sequence_binding(value: TextValue | tuple[int]) -> None:
     match value:
         case TextValue(value=item) | [item]:
-            reveal_type(item)  # revealed: Unknown
+            reveal_type(item)  # revealed: str | int
 
-def mapping_or_sequence_binding(value: dict[str, str] | tuple[int]) -> None:
+def mapping_or_singleton_binding(value: StringMapping | None) -> None:
     match value:
-        case {"value": item} | [item]:
-            reveal_type(item)  # revealed: Unknown
+        case {"value": item} | (None as item):
+            reveal_type(item)  # revealed: str | None
 ```
 
 ## Declared pattern captures
