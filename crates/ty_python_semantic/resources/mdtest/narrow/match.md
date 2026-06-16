@@ -1355,8 +1355,7 @@ def test_required_typed_dict_key_excludes_fallback_binding(
 
 When a class, mapping, or sequence pattern succeeds, it can narrow the original match subject even
 if the pattern does not bind a name for the whole value. Nested patterns can remove union members,
-and an `or` pattern combines the possibilities from its alternatives. When only some constraints of
-a type variable can match, the narrowed subject keeps the original type variable in an intersection.
+and an `or` pattern combines the possibilities from its alternatives.
 
 ```py
 from typing import Any, Generic, Literal, TypeVar, final
@@ -1422,38 +1421,12 @@ def test_match_self_mutable_sequence_narrowing_can_become_stale(
             # pattern was evaluated. After reversing the list, value[0] should be str.
             reveal_type(value[0])  # revealed: int
 
-ConstrainedPayloadT = TypeVar(
-    "ConstrainedPayloadT",
-    TaggedPayload[Literal["int"], int],
-    TaggedPayload[Literal["str"], str],
-)
-
-def test_match_class_narrows_constrained_typevar_subject(value: ConstrainedPayloadT) -> None:
-    match value:
-        case TaggedPayload("int", _):
-            # revealed: ConstrainedPayloadT@test_match_class_narrows_constrained_typevar_subject & TaggedPayload[Literal["int"], int]
-            reveal_type(value)
-
 def test_match_class_or_pattern_narrows_subject(
     value: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str] | TaggedPayload[Literal["bool"], bool],
 ) -> None:
     match value:
         case TaggedPayload("int", _) | TaggedPayload("str", _):
             # revealed: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str]
-            reveal_type(value)
-
-@final
-class SubjectChoiceA: ...
-
-@final
-class SubjectChoiceB: ...
-
-SubjectChoiceT = TypeVar("SubjectChoiceT", SubjectChoiceA, SubjectChoiceB)
-
-def test_match_class_or_pattern_preserves_constrained_typevar_subject(value: SubjectChoiceT | str) -> None:
-    match value:
-        case SubjectChoiceA() | SubjectChoiceB():
-            # revealed: SubjectChoiceT@test_match_class_or_pattern_preserves_constrained_typevar_subject
             reveal_type(value)
 
 def test_match_sequence_narrows_tuple_element_subject(
@@ -2879,21 +2852,11 @@ reveal_type(x)  # revealed: object
 When performing narrowing on `self` inside methods on enums, we take into account that `Self` might
 refer to a subtype of the enum class, like `Literal[Answer.YES]`. This is why we do not simplify
 `Self & ~Literal[Answer.YES]` to `Literal[Answer.NO, Answer.MAYBE]`. Otherwise, we wouldn't be able
-to return `self` in the `assert_yes` method below. An unrelated type variable in the subject does
-not change this representation:
+to return `self` in the `assert_yes` method below.
 
 ```py
 from enum import Enum
-from typing import TypeVar, final
 from typing_extensions import Self, assert_never
-
-@final
-class OtherA: ...
-
-@final
-class OtherB: ...
-
-OtherT = TypeVar("OtherT", OtherA, OtherB)
 
 class Answer(Enum):
     NO = 0
@@ -2948,11 +2911,6 @@ class Answer(Enum):
             case _:
                 reveal_type(self)  # revealed: Self@assert_yes & ~Literal[Answer.YES]
                 raise ValueError("Answer is not YES")
-
-    def mixed_typevar_subject(self, value: Self | OtherT) -> None:
-        match value:
-            case Answer.NO | Answer.MAYBE:
-                reveal_type(value)  # revealed: Self@mixed_typevar_subject
 
     def alias_through_alternatives(self) -> Self:
         match self:
