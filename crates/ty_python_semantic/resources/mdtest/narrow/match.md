@@ -756,6 +756,12 @@ def homogeneous_sequence_uses_one_constraint(value: list[CorrelatedT]) -> Correl
         case _:
             raise ValueError
 
+def sequence_rest_uses_the_tested_constraint(value: list[CorrelatedT]) -> None:
+    match value:
+        case [CorrelatedA(), *rest]:
+            # revealed: list[CorrelatedT@sequence_rest_uses_the_tested_constraint] & list[CorrelatedA]
+            reveal_type(rest)
+
 def bounded_typevar_can_use_different_union_members(
     value: tuple[BoundedCorrelationT, BoundedCorrelationT],
 ) -> None:
@@ -832,6 +838,12 @@ def mapping_test_refines_sibling_capture(value: dict[str, CorrelatedT]) -> Corre
         case _:
             raise ValueError
 
+def mapping_rest_uses_the_tested_constraint(value: dict[str, CorrelatedT]) -> None:
+    match value:
+        case {"kind": CorrelatedA(), **rest}:
+            # revealed: dict[str, CorrelatedT@mapping_rest_uses_the_tested_constraint] & dict[str, CorrelatedA]
+            reveal_type(rest)
+
 class CorrelatedBase(Generic[CorrelatedT]):
     __match_args__ = ("item",)
     item: CorrelatedT
@@ -895,6 +907,9 @@ def excessive_constraint_combinations_fall_back(
         ]:
             # The 81 possible combinations exceed the expansion limit.
             reveal_type(first)  # revealed: Expansion0T@excessive_constraint_combinations_fall_back
+            reveal_type(fourth)  # revealed: Expansion3T@excessive_constraint_combinations_fall_back
+            # revealed: tuple[Expansion0T@excessive_constraint_combinations_fall_back, Expansion0T@excessive_constraint_combinations_fall_back, Expansion1T@excessive_constraint_combinations_fall_back, Expansion1T@excessive_constraint_combinations_fall_back, Expansion2T@excessive_constraint_combinations_fall_back, Expansion2T@excessive_constraint_combinations_fall_back, Expansion3T@excessive_constraint_combinations_fall_back, Expansion3T@excessive_constraint_combinations_fall_back] & <Protocol with members '__getitem__', '__len__'>
+            reveal_type(value)
 ```
 
 The same relationship is preserved when the repeated type variable appears through a generic type
