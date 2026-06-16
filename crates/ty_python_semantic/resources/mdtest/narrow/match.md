@@ -764,10 +764,33 @@ def bounded_typevar_can_use_different_union_members(
             # revealed: BoundedCorrelationT@bounded_typevar_can_use_different_union_members & CorrelatedA
             reveal_type(item)
 
+@final
 class CorrelatedPair(Generic[CorrelatedT]):
     __match_args__ = ("left", "right")
     left: CorrelatedT
     right: CorrelatedT
+
+def correlated_sequence_alternatives_are_exhaustive(
+    value: tuple[CorrelatedT, CorrelatedT],
+) -> int:
+    match value:
+        case [CorrelatedA(), CorrelatedA()] | [CorrelatedB(), CorrelatedB()]:
+            return 1
+
+def incomplete_correlated_sequence_alternatives_can_fall_through(
+    value: tuple[CorrelatedT, CorrelatedT],
+    # error: [invalid-return-type]
+) -> int:
+    match value:
+        case [CorrelatedA(), CorrelatedA()]:
+            return 1
+
+def correlated_class_alternatives_are_exhaustive(
+    value: CorrelatedPair[CorrelatedT],
+) -> int:
+    match value:
+        case CorrelatedPair(CorrelatedA(), CorrelatedA()) | CorrelatedPair(CorrelatedB(), CorrelatedB()):
+            return 1
 
 def class_child_refines_sibling_capture(
     value: CorrelatedPair[CorrelatedT],

@@ -131,6 +131,68 @@ pub(crate) fn constrained_typevars_in_type<'db>(
     collector.typevars.into_inner()
 }
 
+const MAX_CONSTRAINED_TYPEVAR_EXPANSIONS: usize = 64;
+
+/// Substitute each selected constrained type variable with one constraint consistently throughout
+/// the complete type.
+///
+/// Returns `None` when there are no selected type variables or when their Cartesian product would
+/// exceed the expansion limit.
+pub(crate) fn expand_constrained_typevars<'db>(
+    db: &'db dyn Db,
+    ty: Type<'db>,
+    typevars: &[BoundTypeVarInstance<'db>],
+) -> Option<SmallVec<[Type<'db>; 2]>> {
+    if typevars.is_empty() {
+        return None;
+    }
+
+    let expansion_count = typevars.iter().try_fold(1usize, |count, typevar| {
+        count.checked_mul(typevar.typevar(db).constraints(db)?.len())
+    })?;
+    if expansion_count > MAX_CONSTRAINED_TYPEVAR_EXPANSIONS {
+        return None;
+    }
+
+    let mut expanded: SmallVec<[Type<'db>; 2]> = SmallVec::with_capacity(expansion_count);
+    expanded.push(ty);
+    for typevar in typevars.iter().copied() {
+        let constraints = typevar.typevar(db).constraints(db)?;
+        let mut next: SmallVec<[Type<'db>; 2]> = SmallVec::with_capacity(expansion_count);
+        for ty in expanded {
+            next.extend(
+                constraints
+                    .iter()
+                    .map(|constraint| ty.substitute_one_typevar(db, typevar, *constraint)),
+            );
+        }
+        expanded = next;
+    }
+    Some(expanded)
+}
+
+/// Replace each selected constrained type variable with the union of its constraints.
+///
+/// Unlike [`expand_constrained_typevars`], this does not preserve correlations between repeated
+/// occurrences. It provides a bounded fallback when enumerating every combination would be too
+/// expensive.
+pub(crate) fn flatten_constrained_typevars<'db>(
+    db: &'db dyn Db,
+    mut ty: Type<'db>,
+    typevars: &[BoundTypeVarInstance<'db>],
+) -> Type<'db> {
+    for typevar in typevars.iter().copied() {
+        if let Some(constraints) = typevar.typevar(db).constraints(db) {
+            ty = ty.substitute_one_typevar(
+                db,
+                typevar,
+                UnionType::from_elements(db, constraints.iter().copied()),
+            );
+        }
+    }
+    ty
+}
+
 /// A specific instance of a type variable that has not been bound to a generic context yet.
 ///
 /// This is usually not the type that you want; if you are working with a typevar, in a generic

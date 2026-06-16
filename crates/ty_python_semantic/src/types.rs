@@ -94,10 +94,12 @@ pub use crate::types::type_alias::TypeAliasType;
 pub use crate::types::type_form::TypeFormType;
 pub(crate) use crate::types::typed_dict::TypedDictType;
 use crate::types::typevar::TypeVarInstance;
-pub(crate) use crate::types::typevar::constrained_typevars_in_type;
 pub use crate::types::typevar::{
     BindingContext, BoundTypeVarInstance, ParamSpecAttrKind, TypeVarBoundOrConstraints,
     TypeVarKind, TypeVarNonce,
+};
+pub(crate) use crate::types::typevar::{
+    constrained_typevars_in_type, expand_constrained_typevars, flatten_constrained_typevars,
 };
 pub use crate::types::variance::TypeVarVariance;
 use crate::types::variance::VarianceInferable;
