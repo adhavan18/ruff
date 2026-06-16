@@ -241,7 +241,7 @@ struct PatternSuccessResult<'db> {
     /// Exact tuples can retain matched length and element facts. Other sequence types can have
     /// mutable or stateful length and item access, so their bindings retain only facts that remain
     /// valid after the pattern finishes.
-    /// Subject-only analysis does not compute a binding type and leaves this equal to
+    /// Subject narrowing does not infer bindings and leaves this equal to
     /// [`Self::matched_subject_ty`].
     binding_subject_ty: Type<'db>,
     bindings: BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>,
@@ -294,9 +294,9 @@ enum OriginalSubjectPreservation {
 /// depend on alternative order. Binding inference instead excludes values definitely matched by an
 /// earlier alternative before inferring bindings for a later one.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum PatternAnalysisMode {
-    Bindings,
-    SubjectOnly,
+enum PatternAnalysisPurpose {
+    BindingInference,
+    SubjectNarrowing,
 }
 
 impl<'db> PatternBindingTypes<'db> {
@@ -386,11 +386,12 @@ enum PatternValueSource {
 /// Computes the subject and binding types produced by successful match patterns.
 ///
 /// Structural patterns pass the type of each extracted value to their child patterns. Results from
-/// a subject union are combined only after each complete union arm has been checked.
+/// a subject union are combined only after each complete union arm has been checked. Binding
+/// inference additionally records the names created by the successful pattern.
 struct PatternSuccessAnalyzer<'db> {
     db: &'db dyn Db,
     scope: ScopeId<'db>,
-    mode: PatternAnalysisMode,
+    purpose: PatternAnalysisPurpose,
 }
 
 /// Infer the types of all names bound when `pattern` succeeds.
@@ -421,7 +422,7 @@ pub(crate) fn pattern_success_types<'db>(
     let subject = pattern.subject(db);
     let incoming_subject_ty = infer_same_file_expression_type(db, subject, TypeContext::default());
     let incoming_subject_ty = type_narrowed_by_previous_patterns(db, pattern, incoming_subject_ty);
-    let analyzer = PatternSuccessAnalyzer::new(db, pattern.scope(db));
+    let analyzer = PatternSuccessAnalyzer::for_bindings(db, pattern.scope(db));
     let result = analyzer.analyze_successful_pattern(pattern.kind(db), incoming_subject_ty);
     PatternSuccessTypes {
         bindings: result
@@ -1284,9 +1285,9 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
 
     /// Return the positive constraint produced when `pattern` matches `subject_ty`.
     ///
-    /// A successful subject type includes the incoming type so it can be assigned to a pattern
-    /// binding. A flow constraint is applied to the current type later, so leaf patterns retain
-    /// their direct runtime-test constraint instead of intersecting the incoming type twice.
+    /// Leaf patterns return their direct runtime-test constraint; the caller applies that constraint
+    /// to the current subject type. Structural patterns use the type established by successful
+    /// pattern analysis.
     fn positive_subject_constraint(
         &mut self,
         pattern: &PatternPredicateKind<'db>,
@@ -1307,37 +1308,6 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             }
             PatternPredicateKind::As(None, _) | PatternPredicateKind::Star(_) => None,
             PatternPredicateKind::Or(patterns) => {
-                if subject_ty.has_non_self_typevar(self.db) {
-                    let resolved_subject_ty = subject_ty.resolve_type_alias(self.db);
-                    let subject_members: SmallVec<[Type<'db>; 2]> = match resolved_subject_ty {
-                        Type::Union(union) => union.elements(self.db).iter().copied().collect(),
-                        _ => smallvec![subject_ty],
-                    };
-                    let mut constraints = subject_members.into_iter().map(|subject_member| {
-                        let pattern_constraint = if subject_member.has_non_self_typevar(self.db) {
-                            let matched_subject_ty =
-                                PatternSuccessAnalyzer::subject_only(self.db, self.scope())
-                                    .analyze_successful_pattern(pattern, subject_member)
-                                    .matched_subject_ty;
-                            (!matched_subject_ty.is_equivalent_to(self.db, subject_member))
-                                .then(|| NarrowingConstraint::intersection(matched_subject_ty))
-                        } else {
-                            self.positive_subject_constraint(pattern, subject_member)
-                        };
-                        let subject_constraint = NarrowingConstraint::intersection(subject_member);
-                        match pattern_constraint {
-                            Some(pattern_constraint) => {
-                                subject_constraint.merge_constraint_and(pattern_constraint)
-                            }
-                            None => subject_constraint,
-                        }
-                    });
-                    let mut constraint = constraints.next()?;
-                    for member_constraint in constraints {
-                        constraint.merge_constraint_or(member_constraint);
-                    }
-                    return Some(constraint);
-                }
                 let mut patterns = patterns.iter();
                 let mut constraint =
                     self.positive_subject_constraint(patterns.next()?, subject_ty)?;
@@ -1350,7 +1320,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             }
             _ => {
                 let matched_subject_ty =
-                    PatternSuccessAnalyzer::subject_only(self.db, self.scope())
+                    PatternSuccessAnalyzer::for_subject_narrowing(self.db, self.scope())
                         .analyze_successful_pattern(pattern, subject_ty)
                         .matched_subject_ty;
                 (!matched_subject_ty.is_equivalent_to(self.db, subject_ty))
@@ -1361,25 +1331,25 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
 }
 
 impl<'db> PatternSuccessAnalyzer<'db> {
-    fn new(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
+    fn for_bindings(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
         Self {
             db,
             scope,
-            mode: PatternAnalysisMode::Bindings,
+            purpose: PatternAnalysisPurpose::BindingInference,
         }
     }
 
-    /// Create an analyzer that computes only the type matched by the complete pattern.
-    fn subject_only(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
+    /// Create an analyzer that computes only the type established by the complete pattern.
+    fn for_subject_narrowing(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
         Self {
             db,
             scope,
-            mode: PatternAnalysisMode::SubjectOnly,
+            purpose: PatternAnalysisPurpose::SubjectNarrowing,
         }
     }
 
-    fn analyzes_bindings(&self) -> bool {
-        self.mode == PatternAnalysisMode::Bindings
+    fn infers_bindings(&self) -> bool {
+        self.purpose == PatternAnalysisPurpose::BindingInference
     }
 
     fn merge_binding(
@@ -1454,7 +1424,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     },
                     |pattern| self.analyze_successful_pattern(pattern, subject_ty),
                 );
-                if self.analyzes_bindings()
+                if self.infers_bindings()
                     && !result.matched_subject_ty.is_never()
                     && let Some(place) = name
                         .as_ref()
@@ -1470,7 +1440,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             }
             PatternPredicateKind::Star(name) => {
                 let mut bindings = BTreeMap::new();
-                if self.analyzes_bindings()
+                if self.infers_bindings()
                     && let Some(place) = name
                         .as_ref()
                         .and_then(|name| self.places().symbol_id(name.as_str()))
@@ -1550,7 +1520,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         patterns: &[PatternPredicateKind<'db>],
         subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
-        if self.mode == PatternAnalysisMode::SubjectOnly {
+        if self.purpose == PatternAnalysisPurpose::SubjectNarrowing {
             let mut matched_subject_types = UnionBuilder::new(self.db);
             for pattern in patterns {
                 let result = self.analyze_successful_pattern(pattern, subject_ty);
@@ -1559,7 +1529,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             let matched_subject_ty = matched_subject_types.build();
             return PatternSuccessResult {
                 matched_subject_ty,
-                stable_subject_ty: matched_subject_ty,
+                binding_subject_ty: matched_subject_ty,
                 bindings: BTreeMap::new(),
             };
         }
@@ -1587,9 +1557,12 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             remaining_subject_ty =
                 pattern_fallthrough_type(self.db, previous_pattern, remaining_subject_ty);
             let alternative = self.analyze_successful_pattern(pattern, remaining_subject_ty);
-            matched_subject_types.add_in_place(alternative.matched_subject_ty);
             binding_subject_types.add_in_place(alternative.binding_subject_ty);
             Self::merge_bindings(&mut bindings, alternative.bindings);
+
+            let subject_result = Self::for_subject_narrowing(self.db, self.scope)
+                .analyze_successful_pattern(pattern, subject_ty);
+            matched_subject_types.add_in_place(subject_result.matched_subject_ty);
             previous_pattern = pattern;
         }
 
@@ -1935,7 +1908,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     Self::merge_bindings(&mut bindings, child.bindings);
                 }
 
-                if analyzer.analyzes_bindings()
+                if analyzer.infers_bindings()
                     && let Some(place) = kind
                         .rest
                         .as_ref()
@@ -1997,7 +1970,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 let mut bindings = BTreeMap::new();
                 let mut matched_element_types = Vec::with_capacity(kind.patterns.len());
                 let mut binding_element_types = analyzer
-                    .analyzes_bindings()
+                    .infers_bindings()
                     .then(|| Vec::with_capacity(kind.patterns.len()));
                 for (pattern, element_ty) in kind.patterns.iter().zip(element_types) {
                     let mut child = analyzer.analyze_successful_pattern(pattern, element_ty);
@@ -2131,12 +2104,12 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             .into_iter()
             .chunk_by(|(original_subject_ty, _)| *original_subject_ty);
         let mut matched_subject_types = UnionBuilder::new(self.db);
-        let mut binding_subject_types = self.analyzes_bindings().then(|| UnionBuilder::new(self.db));
+        let mut binding_subject_types = self.infers_bindings().then(|| UnionBuilder::new(self.db));
         let mut bindings = BTreeMap::new();
 
         for (original_subject_ty, arms) in &grouped_arms {
             let mut matched_types = UnionBuilder::new(self.db);
-            let mut binding_types = self.analyzes_bindings().then(|| UnionBuilder::new(self.db));
+            let mut binding_types = self.infers_bindings().then(|| UnionBuilder::new(self.db));
             let mut arm_bindings = BTreeMap::new();
 
             for (_, filtering_subject_ty) in arms {
@@ -2149,7 +2122,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 }
             }
 
-            if self.analyzes_bindings() {
+            if self.infers_bindings() {
                 for binding in arm_bindings.values_mut() {
                     let subject_ty = binding.subject_ty(self.db);
                     if !subject_ty.is_never() {
