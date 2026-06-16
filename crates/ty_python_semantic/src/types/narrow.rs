@@ -362,6 +362,12 @@ struct ClassPatternArgument<'db> {
     source: PatternValueSource,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatternValueSource {
+    Subject,
+    Extracted,
+}
+
 /// Computes the subject and binding types produced by successful match patterns.
 ///
 /// Structural patterns pass the type of each extracted value to their child patterns. Results from
