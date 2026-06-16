@@ -1535,10 +1535,9 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         let context = ClassPatternContext {
             class,
             class_ty,
-            positional_sources: class_pattern_positional_sources(
-                self.db,
-                class,
-                kind.positional.len(),
+            positional_sources: class.map_or_else(
+                || vec![ClassPatternPositionalSource::Unknown; kind.positional.len()],
+                |class| class_pattern_positional_sources(self.db, class, kind.positional.len()),
             ),
         };
         self.analyze_pattern_subject_arms(

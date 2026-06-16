@@ -2,7 +2,7 @@ use ruff_python_ast as ast;
 use ruff_python_ast::name::Name;
 use ty_python_core::Truthiness;
 use ty_python_core::predicate::{
-    ClassPatternPredicateKind, MappingPatternEntryPredicateKind, PatternPredicateKind,
+    ClassPatternPredicateKind, MappingPatternPredicateKind, PatternPredicateKind,
     SequencePatternPredicateKind,
 };
 
@@ -284,6 +284,7 @@ enum ClassMatchArgs<'db> {
 }
 
 /// The value supplied to one positional subpattern in a class pattern.
+#[derive(Clone)]
 pub(crate) enum ClassPatternPositionalSource {
     /// The complete subject, as used by Python's special built-in class patterns.
     MatchSelf,
@@ -438,11 +439,11 @@ fn pattern_is_exhaustive_for_subject(
 /// guarantee that a particular key is present.
 fn mapping_pattern_is_exhaustive(
     db: &dyn Db,
-    entries: &[MappingPatternEntryPredicateKind<'_>],
+    kind: &MappingPatternPredicateKind<'_>,
     subject_ty: Type<'_>,
 ) -> bool {
     typed_dict_pattern_domain_satisfies(db, subject_ty, &|typed_dict| {
-        entries.iter().all(|entry| {
+        kind.entries.iter().all(|entry| {
             let key_ty = infer_same_file_expression_type(db, entry.key, TypeContext::default());
             let Some(key) = key_ty.as_string_literal() else {
                 return false;
@@ -784,7 +785,7 @@ fn subject_independent_definite_match_pattern_type<'db>(
             })
         }
         PatternPredicateKind::Mapping(kind) => {
-            if kind.is_empty() {
+            if kind.is_irrefutable() {
                 Some(mapping_pattern_type(db))
             } else {
                 None
@@ -835,7 +836,7 @@ pub(crate) fn definite_match_pattern_type<'db>(
             }
         }
         PatternPredicateKind::Mapping(kind) => {
-            if kind.is_empty() {
+            if kind.is_irrefutable() {
                 mapping_pattern_type(db)
             } else {
                 Type::Never
