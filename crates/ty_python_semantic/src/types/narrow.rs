@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, btree_map::Entry as BTreeEntry, hash_map::Entry};
 
 use crate::Db;
@@ -12,14 +13,14 @@ use crate::types::typed_dict::{
     TypedDictField, TypedDictFieldBuilder, TypedDictSchema, TypedDictType,
 };
 use crate::types::{
-    CallableType, ClassBase, ClassLiteral, ClassPatternPositionalSource, ClassType,
-    IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
-    Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner, SubclassOfType, Truthiness,
-    Type, TypeContext, TypeVarBoundOrConstraints, UnionBuilder, callable_pattern_type,
-    class_pattern_positional_sources, definite_match_pattern_type_for_subject,
-    exact_sequence_pattern_type, infer_expression_types, mapping_pattern_type,
-    pattern_fallthrough_type, sequence_pattern_type_builder, singleton_pattern_type,
-    starred_sequence_pattern_type, typed_dict_matches_class_pattern,
+    BoundTypeVarInstance, CallableType, ClassBase, ClassLiteral, ClassPatternPositionalSource,
+    ClassType, IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType,
+    LiteralValueTypeKind, Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner,
+    SubclassOfType, Truthiness, Type, TypeAliasType, TypeContext, TypeVarBoundOrConstraints,
+    UnionBuilder, callable_pattern_type, class_pattern_positional_sources,
+    definite_match_pattern_type_for_subject, exact_sequence_pattern_type, infer_expression_types,
+    mapping_pattern_type, pattern_fallthrough_type, sequence_pattern_type_builder,
+    singleton_pattern_type, starred_sequence_pattern_type, typed_dict_matches_class_pattern,
 };
 use ty_python_core::expression::Expression;
 use ty_python_core::frozen::FrozenMap;
@@ -42,6 +43,7 @@ use super::equality::{
     equality_exclusion_constraint, equality_truthiness, evaluate_type_equality,
     evaluate_type_inequality,
 };
+use super::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
 use itertools::Itertools;
 use ruff_python_ast as ast;
 use ruff_python_ast::{BoolOp, ExprBoolOp};
@@ -245,6 +247,261 @@ struct PatternSuccessResult<'db> {
     /// [`Self::matched_subject_ty`].
     binding_subject_ty: Type<'db>,
     bindings: BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>,
+    typevar_evidence: PatternTypeVarEvidence<'db>,
+}
+
+/// Evidence about how one pattern node uses constrained type variables.
+///
+/// Alternative ways to analyze the same node merge this evidence idempotently. Structural child
+/// patterns are combined separately so that repeated occurrences can establish a correlation.
+#[derive(Default)]
+struct PatternTypeVarEvidence<'db> {
+    entries: SmallVec<[PatternTypeVarEvidenceEntry<'db>; 2]>,
+}
+
+struct PatternTypeVarEvidenceEntry<'db> {
+    typevar: BoundTypeVarInstance<'db>,
+    flags: PatternTypeVarEvidenceFlags,
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Default)]
+    struct PatternTypeVarEvidenceFlags: u8 {
+        /// A pattern anywhere below this node tested the type variable.
+        const TESTED_IN_SUBTREE = 1 << 0;
+        /// This node directly tested the type variable that it received.
+        const DIRECTLY_TESTED = 1 << 1;
+        /// Sibling children observed the variable and at least one tested it.
+        const BINDING_CORRELATED = 1 << 2;
+        /// Multiple sibling children tested the variable.
+        const SUBJECT_CORRELATED = 1 << 3;
+    }
+}
+
+#[derive(Default)]
+struct PatternTypeVarEvidenceBuilder<'db> {
+    evidence: PatternTypeVarEvidence<'db>,
+    children: SmallVec<[PatternTypeVarChildState<'db>; 2]>,
+}
+
+struct PatternTypeVarChildState<'db> {
+    typevar: BoundTypeVarInstance<'db>,
+    tested_in_subtree: bool,
+}
+
+#[derive(Default)]
+struct ConstrainedTypeVarCollector<'db> {
+    typevars: RefCell<SmallVec<[BoundTypeVarInstance<'db>; 2]>>,
+    recursion_guard: TypeCollector<'db>,
+}
+
+impl<'db> ConstrainedTypeVarCollector<'db> {
+    /// Visit type variables that directly determine which runtime value a pattern tests.
+    fn visit_tested_subject_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        if self.recursion_guard.type_was_already_seen(ty) {
+            return;
+        }
+        match ty {
+            Type::TypeVar(typevar) => self.visit_bound_type_var_type(db, typevar),
+            Type::Union(union) => {
+                for element in union.elements(db) {
+                    self.visit_tested_subject_type(db, *element);
+                }
+            }
+            Type::Intersection(intersection) => {
+                for element in intersection
+                    .positive(db)
+                    .iter()
+                    .chain(intersection.negative(db))
+                {
+                    self.visit_tested_subject_type(db, *element);
+                }
+            }
+            Type::TypeAlias(_) => {}
+            _ => {}
+        }
+    }
+}
+
+impl<'db> TypeVisitor<'db> for ConstrainedTypeVarCollector<'db> {
+    fn should_visit_lazy_type_attributes(&self) -> bool {
+        false
+    }
+
+    fn visit_bound_type_var_type(&self, db: &'db dyn Db, typevar: BoundTypeVarInstance<'db>) {
+        if typevar.typevar(db).constraints(db).is_some()
+            && !self
+                .typevars
+                .borrow()
+                .iter()
+                .any(|existing| existing.is_same_typevar_as(db, typevar))
+        {
+            self.typevars.borrow_mut().push(typevar);
+        }
+    }
+
+    fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
+        if let Some(specialization) = alias.specialization(db) {
+            for ty in specialization.types(db) {
+                self.visit_type(db, *ty);
+            }
+        }
+    }
+
+    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+    }
+}
+
+const MAX_CONSTRAINED_TYPEVAR_EXPANSIONS: usize = 64;
+
+impl<'db> PatternTypeVarEvidence<'db> {
+    fn for_subject(db: &'db dyn Db, subject_ty: Type<'db>, tested: bool) -> Self {
+        if !subject_ty.has_typevar(db) {
+            return Self::default();
+        }
+
+        let observed = ConstrainedTypeVarCollector::default();
+        observed.visit_type(db, subject_ty);
+        let tested_typevars = if tested {
+            let tested = ConstrainedTypeVarCollector::default();
+            tested.visit_tested_subject_type(db, subject_ty);
+            tested.typevars.into_inner()
+        } else {
+            SmallVec::new()
+        };
+
+        Self {
+            entries: observed
+                .typevars
+                .into_inner()
+                .into_iter()
+                .map(|typevar| {
+                    let tested = tested_typevars
+                        .iter()
+                        .any(|tested| tested.is_same_typevar_as(db, typevar));
+                    PatternTypeVarEvidenceEntry {
+                        typevar,
+                        flags: if tested {
+                            PatternTypeVarEvidenceFlags::TESTED_IN_SUBTREE
+                                | PatternTypeVarEvidenceFlags::DIRECTLY_TESTED
+                        } else {
+                            PatternTypeVarEvidenceFlags::empty()
+                        },
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn entry_mut(
+        &mut self,
+        db: &'db dyn Db,
+        typevar: BoundTypeVarInstance<'db>,
+    ) -> &mut PatternTypeVarEvidenceEntry<'db> {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.typevar.is_same_typevar_as(db, typevar))
+        {
+            return &mut self.entries[index];
+        }
+        let index = self.entries.len();
+        self.entries.push(PatternTypeVarEvidenceEntry {
+            typevar,
+            flags: PatternTypeVarEvidenceFlags::empty(),
+        });
+        &mut self.entries[index]
+    }
+
+    /// Merge evidence from alternatives or filtering arms without treating them as siblings.
+    fn merge_alternative(&mut self, db: &'db dyn Db, other: Self) {
+        for other in other.entries {
+            let entry = self.entry_mut(db, other.typevar);
+            entry.flags |= other.flags;
+        }
+    }
+
+    fn correlated_typevars(
+        &self,
+        purpose: PatternAnalysisPurpose,
+    ) -> SmallVec<[BoundTypeVarInstance<'db>; 2]> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .flags
+                    .contains(PatternTypeVarEvidenceFlags::DIRECTLY_TESTED)
+                    || match purpose {
+                        PatternAnalysisPurpose::BindingInference => entry
+                            .flags
+                            .contains(PatternTypeVarEvidenceFlags::BINDING_CORRELATED),
+                        PatternAnalysisPurpose::SubjectNarrowing => entry
+                            .flags
+                            .contains(PatternTypeVarEvidenceFlags::SUBJECT_CORRELATED),
+                    }
+            })
+            .map(|entry| entry.typevar)
+            .collect()
+    }
+}
+
+impl<'db> PatternTypeVarEvidenceBuilder<'db> {
+    fn with_root(evidence: PatternTypeVarEvidence<'db>) -> Self {
+        Self {
+            evidence,
+            children: SmallVec::new(),
+        }
+    }
+
+    /// Add one syntactic child. Evidence from union arms has already been merged inside the child.
+    /// Observing the same variable in separate children can correlate their bindings; narrowing
+    /// the original subject requires both children to have tested it.
+    fn add_child(&mut self, db: &'db dyn Db, child: PatternTypeVarEvidence<'db>) {
+        for child_entry in child.entries {
+            let state_index = self
+                .children
+                .iter()
+                .position(|state| state.typevar.is_same_typevar_as(db, child_entry.typevar));
+            let child_tested = child_entry
+                .flags
+                .contains(PatternTypeVarEvidenceFlags::TESTED_IN_SUBTREE);
+            let previously_tested = state_index
+                .map(|index| self.children[index].tested_in_subtree)
+                .unwrap_or(false);
+            let previously_observed = state_index.is_some();
+
+            let entry = self.evidence.entry_mut(db, child_entry.typevar);
+            entry.flags |= child_entry.flags
+                & (PatternTypeVarEvidenceFlags::TESTED_IN_SUBTREE
+                    | PatternTypeVarEvidenceFlags::BINDING_CORRELATED
+                    | PatternTypeVarEvidenceFlags::SUBJECT_CORRELATED);
+            if (previously_observed && child_tested) || previously_tested {
+                entry
+                    .flags
+                    .insert(PatternTypeVarEvidenceFlags::BINDING_CORRELATED);
+            }
+            if previously_tested && child_tested {
+                entry
+                    .flags
+                    .insert(PatternTypeVarEvidenceFlags::SUBJECT_CORRELATED);
+            }
+
+            if let Some(index) = state_index {
+                let state = &mut self.children[index];
+                state.tested_in_subtree |= child_tested;
+            } else {
+                self.children.push(PatternTypeVarChildState {
+                    typevar: child_entry.typevar,
+                    tested_in_subtree: child_tested,
+                });
+            }
+        }
+    }
+
+    fn finish(self) -> PatternTypeVarEvidence<'db> {
+        self.evidence
+    }
 }
 
 /// The candidate types for one name bound by a successful pattern.
@@ -1403,18 +1660,27 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         pattern: &PatternPredicateKind<'db>,
         subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
+        self.analyze_successful_pattern_with_observed_subject(pattern, subject_ty, subject_ty)
+    }
+
+    fn analyze_successful_pattern_with_observed_subject(
+        &self,
+        pattern: &PatternPredicateKind<'db>,
+        subject_ty: Type<'db>,
+        observed_subject_ty: Type<'db>,
+    ) -> PatternSuccessResult<'db> {
         match pattern {
             PatternPredicateKind::Class(kind) => {
-                self.analyze_successful_class_pattern(kind, subject_ty)
+                self.analyze_successful_class_pattern(kind, subject_ty, observed_subject_ty)
             }
             PatternPredicateKind::Mapping(kind) => {
-                self.analyze_successful_mapping_pattern(kind, subject_ty)
+                self.analyze_successful_mapping_pattern(kind, subject_ty, observed_subject_ty)
             }
             PatternPredicateKind::Sequence(kind) => {
-                self.analyze_successful_sequence_pattern(kind, subject_ty)
+                self.analyze_successful_sequence_pattern(kind, subject_ty, observed_subject_ty)
             }
             PatternPredicateKind::Or(patterns) => {
-                self.analyze_successful_or_pattern(patterns, subject_ty)
+                self.analyze_successful_or_pattern(patterns, subject_ty, observed_subject_ty)
             }
             PatternPredicateKind::As(pattern, name) => {
                 let mut result = pattern.as_deref().map_or_else(
@@ -1422,8 +1688,19 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                         matched_subject_ty: subject_ty,
                         binding_subject_ty: subject_ty,
                         bindings: BTreeMap::new(),
+                        typevar_evidence: PatternTypeVarEvidence::for_subject(
+                            self.db,
+                            observed_subject_ty,
+                            false,
+                        ),
                     },
-                    |pattern| self.analyze_successful_pattern(pattern, subject_ty),
+                    |pattern| {
+                        self.analyze_successful_pattern_with_observed_subject(
+                            pattern,
+                            subject_ty,
+                            observed_subject_ty,
+                        )
+                    },
                 );
                 if self.infers_bindings()
                     && !result.matched_subject_ty.is_never()
@@ -1456,6 +1733,11 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     matched_subject_ty: subject_ty,
                     binding_subject_ty: subject_ty,
                     bindings,
+                    typevar_evidence: PatternTypeVarEvidence::for_subject(
+                        self.db,
+                        observed_subject_ty,
+                        false,
+                    ),
                 }
             }
             PatternPredicateKind::Value(value) => {
@@ -1464,6 +1746,11 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     matched_subject_ty,
                     binding_subject_ty: matched_subject_ty,
                     bindings: BTreeMap::new(),
+                    typevar_evidence: PatternTypeVarEvidence::for_subject(
+                        self.db,
+                        observed_subject_ty,
+                        true,
+                    ),
                 }
             }
             PatternPredicateKind::Singleton(_) => {
@@ -1473,6 +1760,11 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     matched_subject_ty,
                     binding_subject_ty: matched_subject_ty,
                     bindings: BTreeMap::new(),
+                    typevar_evidence: PatternTypeVarEvidence::for_subject(
+                        self.db,
+                        observed_subject_ty,
+                        true,
+                    ),
                 }
             }
         }
@@ -1506,12 +1798,17 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         patterns: &[PatternPredicateKind<'db>],
         subject_ty: Type<'db>,
+        observed_subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
         self.analyze_pattern_subject_arms(
             subject_ty,
             OriginalSubjectPreservation::TypeVariablesOnly,
             |analyzer, _, arm_ty| {
-                Some(analyzer.analyze_successful_or_pattern_arm(patterns, arm_ty))
+                Some(analyzer.analyze_successful_or_pattern_arm(
+                    patterns,
+                    arm_ty,
+                    observed_subject_ty,
+                ))
             },
         )
     }
@@ -1520,18 +1817,26 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         patterns: &[PatternPredicateKind<'db>],
         subject_ty: Type<'db>,
+        observed_subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
         if self.purpose == PatternAnalysisPurpose::SubjectNarrowing {
             let mut matched_subject_types = UnionBuilder::new(self.db);
+            let mut typevar_evidence = PatternTypeVarEvidence::default();
             for pattern in patterns {
-                let result = self.analyze_successful_pattern(pattern, subject_ty);
+                let result = self.analyze_successful_pattern_with_observed_subject(
+                    pattern,
+                    subject_ty,
+                    observed_subject_ty,
+                );
                 matched_subject_types.add_in_place(result.matched_subject_ty);
+                typevar_evidence.merge_alternative(self.db, result.typevar_evidence);
             }
             let matched_subject_ty = matched_subject_types.build();
             return PatternSuccessResult {
                 matched_subject_ty,
                 binding_subject_ty: matched_subject_ty,
                 bindings: BTreeMap::new(),
+                typevar_evidence,
             };
         }
 
@@ -1541,9 +1846,14 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 matched_subject_ty: Type::Never,
                 binding_subject_ty: Type::Never,
                 bindings: BTreeMap::new(),
+                typevar_evidence: PatternTypeVarEvidence::default(),
             };
         };
-        let first = self.analyze_successful_pattern(first_pattern, subject_ty);
+        let first = self.analyze_successful_pattern_with_observed_subject(
+            first_pattern,
+            subject_ty,
+            observed_subject_ty,
+        );
         let mut matched_subject_types = UnionBuilder::new(self.db);
         matched_subject_types.add_in_place(first.matched_subject_ty);
         let mut binding_subject_types = UnionBuilder::new(self.db);
@@ -1551,14 +1861,20 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         // All alternatives bind the same names. Merge by logical place so the case body sees the
         // union even though the semantic walk visits the definitions in order.
         let mut bindings = first.bindings;
+        let mut typevar_evidence = first.typevar_evidence;
         let mut remaining_subject_ty = subject_ty;
         let mut previous_pattern = first_pattern;
 
         for pattern in patterns {
             remaining_subject_ty =
                 pattern_fallthrough_type(self.db, previous_pattern, remaining_subject_ty);
-            let alternative = self.analyze_successful_pattern(pattern, remaining_subject_ty);
+            let alternative = self.analyze_successful_pattern_with_observed_subject(
+                pattern,
+                remaining_subject_ty,
+                observed_subject_ty,
+            );
             binding_subject_types.add_in_place(alternative.binding_subject_ty);
+            typevar_evidence.merge_alternative(self.db, alternative.typevar_evidence);
             Self::merge_bindings(&mut bindings, alternative.bindings);
 
             let subject_result = Self::for_subject_narrowing(self.db, self.scope)
@@ -1571,6 +1887,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             matched_subject_ty: matched_subject_types.build(),
             binding_subject_ty: binding_subject_types.build(),
             bindings,
+            typevar_evidence,
         }
     }
 
@@ -1724,6 +2041,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         kind: &ClassPatternPredicateKind<'db>,
         subject_ty: Type<'db>,
+        observed_subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
         let class_expr_ty =
             infer_same_file_expression_type(self.db, kind.class, TypeContext::default());
@@ -1738,10 +2056,16 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 |class| class_pattern_positional_sources(self.db, class, kind.positional.len()),
             ),
         };
+        let input_subject_ty = subject_ty;
         self.analyze_pattern_subject_arms(
             subject_ty,
             OriginalSubjectPreservation::EquivalentTypes,
             |analyzer, original_subject_ty, subject_ty| {
+                let observed_subject_ty = if observed_subject_ty == input_subject_ty {
+                    original_subject_ty
+                } else {
+                    observed_subject_ty
+                };
                 let narrowed_subject_ty = analyzer.filter_class_pattern_subject_type(
                     context.class,
                     context.class_ty,
@@ -1757,19 +2081,39 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     original_subject_ty,
                     narrowed_subject_ty,
                 )?;
+                let observed_subject_ty = analyzer.filter_class_pattern_subject_type(
+                    context.class,
+                    context.class_ty,
+                    observed_subject_ty,
+                );
+                let observed_arguments = analyzer.class_pattern_arguments_for_arm(
+                    kind,
+                    &context,
+                    observed_subject_ty,
+                    observed_subject_ty,
+                )?;
                 let mut matched_subject_ty = narrowed_subject_ty;
                 let mut binding_subject_ty = narrowed_subject_ty;
                 let mut bindings = BTreeMap::new();
-                for (pattern, argument) in kind
+                let mut evidence = PatternTypeVarEvidenceBuilder::with_root(
+                    PatternTypeVarEvidence::for_subject(analyzer.db, observed_subject_ty, true),
+                );
+                for ((pattern, argument), observed_argument) in kind
                     .positional
                     .iter()
                     .chain(kind.keywords.iter().map(|keyword| &keyword.pattern))
                     .zip(arguments)
+                    .zip(observed_arguments)
                 {
-                    let mut child = analyzer.analyze_successful_pattern(pattern, argument.ty);
+                    let mut child = analyzer.analyze_successful_pattern_with_observed_subject(
+                        pattern,
+                        argument.ty,
+                        observed_argument.ty,
+                    );
                     if child.matched_subject_ty.is_never() {
                         return None;
                     }
+                    evidence.add_child(analyzer.db, child.typevar_evidence);
                     if argument.source != PatternValueSource::Subject {
                         Self::demote_subject_bindings(&mut child.bindings);
                     } else {
@@ -1783,6 +2127,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     matched_subject_ty,
                     binding_subject_ty,
                     bindings,
+                    typevar_evidence: evidence.finish(),
                 })
             },
         )
@@ -1872,6 +2217,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         kind: &MappingPatternPredicateKind<'db>,
         subject_ty: Type<'db>,
+        observed_subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
         let key_types: Vec<_> = kind
             .entries
@@ -1880,10 +2226,16 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 infer_same_file_expression_type(self.db, entry.key, TypeContext::default())
             })
             .collect();
+        let input_subject_ty = subject_ty;
         self.analyze_pattern_subject_arms(
             subject_ty,
             OriginalSubjectPreservation::EquivalentTypes,
-            |analyzer, _, subject_ty| {
+            |analyzer, original_subject_ty, subject_ty| {
+                let observed_subject_ty = if observed_subject_ty == input_subject_ty {
+                    original_subject_ty
+                } else {
+                    observed_subject_ty
+                };
                 let narrowed_subject_ty =
                     analyzer.intersect_types(subject_ty, mapping_pattern_type(analyzer.db));
                 if narrowed_subject_ty.is_never() {
@@ -1899,12 +2251,34 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     })
                     .collect();
                 let value_types = value_types?;
+                let observed_value_types: Option<Vec<_>> = kind
+                    .entries
+                    .iter()
+                    .zip(&key_types)
+                    .map(|(_, key_ty)| {
+                        analyzer.mapping_pattern_value_type_for_arm(observed_subject_ty, *key_ty)
+                    })
+                    .collect();
+                let observed_value_types = observed_value_types?;
                 let mut bindings = BTreeMap::new();
-                for (entry, value_ty) in kind.entries.iter().zip(value_types) {
-                    let mut child = analyzer.analyze_successful_pattern(&entry.pattern, value_ty);
+                let mut evidence = PatternTypeVarEvidenceBuilder::with_root(
+                    PatternTypeVarEvidence::for_subject(analyzer.db, observed_subject_ty, true),
+                );
+                for ((entry, value_ty), observed_value_ty) in kind
+                    .entries
+                    .iter()
+                    .zip(value_types)
+                    .zip(observed_value_types)
+                {
+                    let mut child = analyzer.analyze_successful_pattern_with_observed_subject(
+                        &entry.pattern,
+                        value_ty,
+                        observed_value_ty,
+                    );
                     if child.matched_subject_ty.is_never() {
                         return None;
                     }
+                    evidence.add_child(analyzer.db, child.typevar_evidence);
                     Self::demote_subject_bindings(&mut child.bindings);
                     Self::merge_bindings(&mut bindings, child.bindings);
                 }
@@ -1923,11 +2297,22 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                         ),
                     );
                 }
+                if kind.rest.is_some() {
+                    evidence.add_child(
+                        analyzer.db,
+                        PatternTypeVarEvidence::for_subject(
+                            analyzer.db,
+                            analyzer.mapping_pattern_rest_type_for_arm(observed_subject_ty),
+                            false,
+                        ),
+                    );
+                }
 
                 Some(PatternSuccessResult {
                     matched_subject_ty: narrowed_subject_ty,
                     binding_subject_ty: narrowed_subject_ty,
                     bindings,
+                    typevar_evidence: evidence.finish(),
                 })
             },
         )
@@ -1960,6 +2345,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         kind: &SequencePatternPredicateKind<'db>,
         subject_ty: Type<'db>,
+        observed_subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
         let target_len = Self::sequence_pattern_target_len(kind);
         let sequence_ty = if self.infers_bindings() {
@@ -1967,22 +2353,43 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         } else {
             necessary_sequence_pattern_type(self.db, kind)
         };
+        let input_subject_ty = subject_ty;
         self.analyze_pattern_subject_arms(
             subject_ty,
             OriginalSubjectPreservation::TypeVariablesOnly,
-            |analyzer, _, subject_ty| {
+            |analyzer, original_subject_ty, subject_ty| {
+                let observed_subject_ty = if observed_subject_ty == input_subject_ty {
+                    original_subject_ty
+                } else {
+                    observed_subject_ty
+                };
                 let (narrowed_subject_ty, element_types) =
                     analyzer.sequence_pattern_arm(subject_ty, target_len, sequence_ty)?;
+                let (_, observed_element_types) =
+                    analyzer.sequence_pattern_arm(observed_subject_ty, target_len, sequence_ty)?;
                 let mut bindings = BTreeMap::new();
                 let mut matched_element_types = Vec::with_capacity(kind.patterns.len());
                 let mut binding_element_types = analyzer
                     .infers_bindings()
                     .then(|| Vec::with_capacity(kind.patterns.len()));
-                for (pattern, element_ty) in kind.patterns.iter().zip(element_types) {
-                    let mut child = analyzer.analyze_successful_pattern(pattern, element_ty);
+                let mut evidence = PatternTypeVarEvidenceBuilder::with_root(
+                    PatternTypeVarEvidence::for_subject(analyzer.db, observed_subject_ty, true),
+                );
+                for ((pattern, element_ty), observed_element_ty) in kind
+                    .patterns
+                    .iter()
+                    .zip(element_types)
+                    .zip(observed_element_types)
+                {
+                    let mut child = analyzer.analyze_successful_pattern_with_observed_subject(
+                        pattern,
+                        element_ty,
+                        observed_element_ty,
+                    );
                     if child.matched_subject_ty.is_never() {
                         return None;
                     }
+                    evidence.add_child(analyzer.db, child.typevar_evidence);
                     matched_element_types.push(child.matched_subject_ty);
                     if let Some(binding_element_types) = &mut binding_element_types {
                         binding_element_types.push(child.binding_subject_ty);
@@ -2004,6 +2411,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     matched_subject_ty,
                     binding_subject_ty,
                     bindings,
+                    typevar_evidence: evidence.finish(),
                 })
             },
         )
@@ -2105,6 +2513,72 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         preservation: OriginalSubjectPreservation,
         analyze_arm: impl Fn(&Self, Type<'db>, Type<'db>) -> Option<PatternSuccessResult<'db>>,
     ) -> PatternSuccessResult<'db> {
+        let mut result =
+            self.analyze_pattern_subject_arms_impl(subject_ty, preservation, &analyze_arm);
+        let typevars = result.typevar_evidence.correlated_typevars(self.purpose);
+        let Some(expanded_subject_types) = self.expand_constrained_typevars(subject_ty, &typevars)
+        else {
+            return result;
+        };
+
+        let mut filtering_matched_subject_types = UnionBuilder::new(self.db);
+        let mut filtering_binding_subject_types =
+            self.infers_bindings().then(|| UnionBuilder::new(self.db));
+        let mut filtering_bindings = BTreeMap::new();
+        for expanded_subject_ty in expanded_subject_types {
+            let expanded_result = self.analyze_pattern_subject_arms_impl(
+                expanded_subject_ty,
+                preservation,
+                &analyze_arm,
+            );
+            filtering_matched_subject_types.add_in_place(expanded_result.matched_subject_ty);
+            if let Some(binding_subject_types) = &mut filtering_binding_subject_types {
+                binding_subject_types.add_in_place(expanded_result.binding_subject_ty);
+                Self::merge_bindings(&mut filtering_bindings, expanded_result.bindings);
+            }
+        }
+        let filtering_matched_subject_ty = filtering_matched_subject_types.build();
+        result.matched_subject_ty = self.typevar_preserving_intersection(
+            result.matched_subject_ty,
+            filtering_matched_subject_ty,
+            &typevars,
+        );
+        if self.infers_bindings() {
+            let filtering_binding_subject_ty = filtering_binding_subject_types
+                .map_or(filtering_matched_subject_ty, UnionBuilder::build);
+            result.binding_subject_ty = self.typevar_preserving_intersection(
+                result.binding_subject_ty,
+                filtering_binding_subject_ty,
+                &typevars,
+            );
+            result.bindings.retain(|place, binding| {
+                let filtering_ty = filtering_bindings
+                    .get(place)
+                    .map_or(Type::Never, |binding| binding.ty(self.db));
+                for contribution in &mut binding.contributions {
+                    contribution.ty = self.typevar_preserving_intersection(
+                        contribution.ty,
+                        filtering_ty,
+                        &typevars,
+                    );
+                }
+                binding
+                    .contributions
+                    .retain(|contribution| !contribution.ty.is_never());
+                !binding.contributions.is_empty()
+            });
+        } else {
+            result.binding_subject_ty = result.matched_subject_ty;
+        }
+        result
+    }
+
+    fn analyze_pattern_subject_arms_impl(
+        &self,
+        subject_ty: Type<'db>,
+        preservation: OriginalSubjectPreservation,
+        analyze_arm: &impl Fn(&Self, Type<'db>, Type<'db>) -> Option<PatternSuccessResult<'db>>,
+    ) -> PatternSuccessResult<'db> {
         let subject_arms = self.match_pattern_subject_arms(subject_ty);
         let grouped_arms = subject_arms
             .into_iter()
@@ -2112,6 +2586,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         let mut matched_subject_types = UnionBuilder::new(self.db);
         let mut binding_subject_types = self.infers_bindings().then(|| UnionBuilder::new(self.db));
         let mut bindings = BTreeMap::new();
+        let mut typevar_evidence = PatternTypeVarEvidence::default();
 
         for (original_subject_ty, arms) in &grouped_arms {
             let mut matched_types = UnionBuilder::new(self.db);
@@ -2121,6 +2596,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             for (_, filtering_subject_ty) in arms {
                 if let Some(arm) = analyze_arm(self, original_subject_ty, filtering_subject_ty) {
                     matched_types.add_in_place(arm.matched_subject_ty);
+                    typevar_evidence.merge_alternative(self.db, arm.typevar_evidence);
                     if let Some(binding_types) = &mut binding_types {
                         binding_types.add_in_place(arm.binding_subject_ty);
                         Self::merge_bindings(&mut arm_bindings, arm.bindings);
@@ -2164,6 +2640,32 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             binding_subject_ty: binding_subject_types
                 .map_or(matched_subject_ty, UnionBuilder::build),
             bindings,
+            typevar_evidence,
+        }
+    }
+
+    fn typevar_preserving_intersection(
+        &self,
+        original_ty: Type<'db>,
+        filtering_ty: Type<'db>,
+        typevars: &[BoundTypeVarInstance<'db>],
+    ) -> Type<'db> {
+        let flattened_original_ty = self
+            .expand_constrained_typevars(original_ty, typevars)
+            .map_or_else(
+                || {
+                    original_ty
+                        .flatten_typevars(self.db)
+                        .resolve_type_alias(self.db)
+                },
+                |expanded| UnionType::from_elements(self.db, expanded),
+            );
+        if original_ty.has_typevar(self.db)
+            && filtering_ty.is_equivalent_to(self.db, flattened_original_ty)
+        {
+            original_ty
+        } else {
+            self.intersect_types(original_ty, filtering_ty)
         }
     }
 
@@ -2231,6 +2733,38 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         } else {
             ty
         }
+    }
+
+    /// Expand selected constrained type variables consistently across the complete subject type.
+    fn expand_constrained_typevars(
+        &self,
+        subject_ty: Type<'db>,
+        typevars: &[BoundTypeVarInstance<'db>],
+    ) -> Option<SmallVec<[Type<'db>; 2]>> {
+        if typevars.is_empty() {
+            return None;
+        }
+
+        let expansion_count = typevars.iter().try_fold(1usize, |count, typevar| {
+            count.checked_mul(typevar.typevar(self.db).constraints(self.db)?.len())
+        })?;
+        if expansion_count > MAX_CONSTRAINED_TYPEVAR_EXPANSIONS {
+            return None;
+        }
+
+        let mut expanded: SmallVec<[Type<'db>; 2]> = SmallVec::with_capacity(expansion_count);
+        expanded.push(subject_ty);
+        for typevar in typevars.iter().copied() {
+            let constraints = typevar.typevar(self.db).constraints(self.db)?;
+            let mut next: SmallVec<[Type<'db>; 2]> = SmallVec::with_capacity(expansion_count);
+            for subject_ty in expanded {
+                next.extend(constraints.iter().map(|constraint| {
+                    subject_ty.substitute_one_typevar(self.db, typevar, *constraint)
+                }));
+            }
+            expanded = next;
+        }
+        Some(expanded)
     }
 
     fn sequence_pattern_target_len(kind: &SequencePatternPredicateKind<'db>) -> TupleLength {

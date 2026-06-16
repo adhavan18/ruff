@@ -12,6 +12,7 @@ use crate::types::callable::{CallableFunctionProvenance, CallableTypeKind};
 use crate::types::equality::{evaluate_type_equality, is_same_enum_domain};
 use crate::types::signatures::CallableSignature;
 use crate::types::tuple::TupleType;
+use crate::types::visitor::any_over_type;
 use crate::types::{
     CallableType, ClassBase, ClassLiteral, EnumLiteralType, IntersectionBuilder, KnownClass,
     Parameter, Parameters, Signature, SpecialFormType, Type, TypeContext,
@@ -545,6 +546,29 @@ pub(crate) fn definite_match_pattern_type_for_subject<'db>(
                 .iter()
                 .map(|element| definite_match_pattern_type_for_subject(db, kind, *element)),
         );
+    }
+
+    let has_constrained_typevar = any_over_type(
+        db,
+        resolved_subject_ty,
+        false,
+        |ty| matches!(ty, Type::TypeVar(typevar) if typevar.typevar(db).constraints(db).is_some()),
+    );
+    let filtering_subject_ty = if has_constrained_typevar {
+        resolved_subject_ty.flatten_typevars(db)
+    } else {
+        resolved_subject_ty
+    };
+    if filtering_subject_ty != resolved_subject_ty {
+        let definite_ty = definite_match_pattern_type_for_subject(db, kind, filtering_subject_ty);
+        return if filtering_subject_ty.is_subtype_of(db, definite_ty) {
+            subject_ty
+        } else {
+            IntersectionBuilder::new(db)
+                .add_positive(subject_ty)
+                .add_positive(definite_ty)
+                .build()
+        };
     }
 
     match kind {
