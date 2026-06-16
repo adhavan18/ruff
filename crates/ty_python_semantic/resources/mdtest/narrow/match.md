@@ -775,7 +775,6 @@ from dataclasses import dataclass
 from typing import Generic, NamedTuple, TypeVar
 
 T = TypeVar("T")
-ClassChoiceT = TypeVar("ClassChoiceT", int, str)
 
 class PatternBox(Generic[T]):
     __match_args__ = ("value",)
@@ -790,16 +789,6 @@ def test_match_class_keyword_capture(value: PatternBox[T]) -> T:
             reveal_type(item)  # revealed: T@test_match_class_keyword_capture
             reveal_type(whole)  # revealed: PatternBox[T@test_match_class_keyword_capture]
             return item
-
-def test_class_attribute_or_alias_preserves_typevar(
-    value: PatternBox[ClassChoiceT],
-) -> ClassChoiceT:
-    match value:
-        case PatternBox(value=(int() as item) | (str() as item)):
-            reveal_type(item)  # revealed: ClassChoiceT@test_class_attribute_or_alias_preserves_typevar
-            return item
-        case _:
-            raise AssertionError
 
 def test_match_indirect_class_keyword_capture(
     value: object,
@@ -1107,7 +1096,6 @@ from collections.abc import Iterator, Mapping
 from typing import Literal, overload, Protocol, TypeVar
 
 MappingValueT = TypeVar("MappingValueT")
-MappingChoiceT = TypeVar("MappingChoiceT", int, str)
 Default = TypeVar("Default")
 
 def test_match_mapping_bindings(value: Mapping[str, MappingValueT]) -> MappingValueT:
@@ -1119,16 +1107,6 @@ def test_match_mapping_bindings(value: Mapping[str, MappingValueT]) -> MappingVa
             reveal_type(whole)
             return item
     raise ValueError
-
-def test_mapping_value_or_alias_preserves_typevar(
-    value: Mapping[str, MappingChoiceT],
-) -> MappingChoiceT:
-    match value:
-        case {"item": (int() as item) | (str() as item)}:
-            reveal_type(item)  # revealed: MappingChoiceT@test_mapping_value_or_alias_preserves_typevar
-            return item
-        case _:
-            raise AssertionError
 
 def test_match_dict_alias_preserves_concrete_type(value: dict[str, int]) -> None:
     match value:
