@@ -1372,7 +1372,7 @@ class TaggedPayload(Generic[TagT, PayloadT]):
 
 class GradualSubjectBox: ...
 
-def test_match_class_narrows_gradual_subjects(
+def match_class_narrows_gradual_subjects(
     any_value: Any,
     unknown_value: Unknown,
 ) -> None:
@@ -1384,7 +1384,7 @@ def test_match_class_narrows_gradual_subjects(
         case GradualSubjectBox():
             reveal_type(unknown_value)  # revealed: Unknown & GradualSubjectBox
 
-def test_match_mapping_narrows_gradual_subjects(
+def match_mapping_narrows_gradual_subjects(
     any_value: Any,
     unknown_value: Unknown,
 ) -> None:
@@ -1396,14 +1396,14 @@ def test_match_mapping_narrows_gradual_subjects(
         case {"key": _}:
             reveal_type(unknown_value)  # revealed: Unknown & Top[Mapping[Unknown, object]]
 
-def test_match_class_narrows_subject(
+def match_class_narrows_subject(
     value: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str],
 ) -> None:
     match value:
         case TaggedPayload("int", _):
             reveal_type(value)  # revealed: TaggedPayload[Literal["int"], int]
 
-def test_match_self_child_narrows_subject(value: bool) -> Literal[True]:
+def match_self_child_narrows_subject(value: bool) -> Literal[True]:
     match value:
         case bool(True):
             reveal_type(value)  # revealed: Literal[True]
@@ -1411,7 +1411,7 @@ def test_match_self_child_narrows_subject(value: bool) -> Literal[True]:
         case _:
             raise AssertionError
 
-def test_match_self_mutable_sequence_narrowing_can_become_stale(
+def match_self_mutable_sequence_narrowing_can_become_stale(
     value: list[int | str],
 ) -> None:
     match value:
@@ -1421,7 +1421,7 @@ def test_match_self_mutable_sequence_narrowing_can_become_stale(
             # pattern was evaluated. After reversing the list, value[0] should be str.
             reveal_type(value[0])  # revealed: int
 
-def test_match_class_or_pattern_narrows_subject(
+def match_class_or_pattern_narrows_subject(
     value: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str] | TaggedPayload[Literal["bool"], bool],
 ) -> None:
     match value:
@@ -1429,7 +1429,7 @@ def test_match_class_or_pattern_narrows_subject(
             # revealed: TaggedPayload[Literal["int"], int] | TaggedPayload[Literal["str"], str]
             reveal_type(value)
 
-def test_match_sequence_narrows_tuple_element_subject(
+def match_sequence_narrows_tuple_element_subject(
     value: tuple[Literal[1, 2]],
 ) -> None:
     match value:
@@ -1439,7 +1439,7 @@ def test_match_sequence_narrows_tuple_element_subject(
 @final
 class FinalWithoutRequestedAttribute: ...
 
-def test_missing_final_class_attribute_rejects_subject_alternative(
+def missing_final_class_attribute_rejects_subject_alternative(
     value: FinalWithoutRequestedAttribute | TaggedPayload[Literal["int"], int],
 ) -> None:
     match value:
@@ -1454,7 +1454,7 @@ class StrPayload(TypedDict):
     tag: Literal["str"]
     value: str
 
-def test_match_mapping_narrows_subject(value: IntPayload | StrPayload) -> None:
+def match_mapping_narrows_subject(value: IntPayload | StrPayload) -> None:
     match value:
         case {"tag": "int"}:
             reveal_type(value)  # revealed: IntPayload
@@ -1467,14 +1467,14 @@ def mapping_pattern_narrows_attribute_subject(container: PayloadContainer) -> No
         case {"tag": "int"}:
             reveal_type(container.payload)  # revealed: IntPayload
 
-def test_nested_mapping_narrows_sequence_subject(
+def nested_mapping_narrows_sequence_subject(
     value: tuple[IntPayload] | tuple[StrPayload],
 ) -> None:
     match value:
         case [{"tag": "int"}]:
             reveal_type(value)  # revealed: tuple[IntPayload]
 
-def test_match_mapping_does_not_narrow_tuple_display_element(
+def match_mapping_does_not_narrow_tuple_display_element(
     value: IntPayload | StrPayload,
 ) -> None:
     match (value,):
@@ -1483,7 +1483,7 @@ def test_match_mapping_does_not_narrow_tuple_display_element(
             # inside tuple display subjects.
             reveal_type(value)  # revealed: IntPayload | StrPayload
 
-def test_match_value_does_not_narrow_dictionary_display_element(
+def match_value_does_not_narrow_dictionary_display_element(
     value: Literal["int", "str"],
 ) -> None:
     match {"tag": value}:
@@ -1492,7 +1492,7 @@ def test_match_value_does_not_narrow_dictionary_display_element(
             # used inside dictionary display subjects.
             reveal_type(value)  # revealed: Literal["int", "str"]
 
-def test_match_mapping_does_not_narrow_dictionary_display_element(
+def match_mapping_does_not_narrow_dictionary_display_element(
     value: IntPayload | StrPayload,
 ) -> None:
     match {"payload": value}:
