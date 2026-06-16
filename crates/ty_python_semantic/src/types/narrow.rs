@@ -2558,8 +2558,17 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     .map_or(Type::Never, |binding| binding.ty(self.db));
                 for contribution in &mut binding.contributions {
                     let original_ty = contribution.original_subject_ty.unwrap_or(contribution.ty);
-                    contribution.ty =
-                        self.typevar_preserving_intersection(original_ty, filtering_ty, &typevars);
+                    let contains_correlated_typevar = typevars.iter().any(|typevar| {
+                        original_ty
+                            .references_typevar(self.db, typevar.typevar(self.db).identity(self.db))
+                    });
+                    contribution.ty = if contribution.original_subject_ty.is_none()
+                        && !contains_correlated_typevar
+                    {
+                        filtering_ty
+                    } else {
+                        self.typevar_preserving_intersection(original_ty, filtering_ty, &typevars)
+                    };
                 }
                 binding
                     .contributions

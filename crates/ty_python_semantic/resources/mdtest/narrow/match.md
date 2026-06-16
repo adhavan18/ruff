@@ -661,7 +661,7 @@ distinct child patterns must test the shared type variable. An upper-bounded typ
 expanded this way because it can specialize to the bound itself, including a union.
 
 ```py
-from typing import Generic, TypeVar, final
+from typing import Generic, Literal, TypeVar, TypedDict, final
 
 @final
 class CorrelatedA: ...
@@ -861,6 +861,31 @@ def mapping_rest_uses_the_tested_constraint(value: dict[str, CorrelatedT]) -> No
         case {"kind": CorrelatedA(), **rest}:
             # revealed: dict[str, CorrelatedT@mapping_rest_uses_the_tested_constraint] & dict[str, CorrelatedA]
             reveal_type(rest)
+
+class CorrelatedIntPayload(TypedDict):
+    kind: Literal["int"]
+    item: int
+
+class CorrelatedStrPayload(TypedDict):
+    kind: Literal["str"]
+    item: str
+
+CorrelatedPayloadT = TypeVar(
+    "CorrelatedPayloadT",
+    CorrelatedIntPayload,
+    CorrelatedStrPayload,
+)
+
+def direct_mapping_subject_uses_the_selected_constraint(
+    value: CorrelatedPayloadT,
+) -> str:
+    match value:
+        case {"kind": "str", "item": item, **rest}:
+            reveal_type(item)  # revealed: str
+            reveal_type(rest)  # revealed: dict[str, object]
+            return item
+        case _:
+            raise ValueError
 
 class CorrelatedBase(Generic[CorrelatedT]):
     __match_args__ = ("item",)
