@@ -827,9 +827,9 @@ def test_incompatible_declared_class_capture(value: PatternBox[int]) -> None:
 ## Generic subclass captures
 
 When a value is typed as a generic base class and the pattern matches one of its subclasses, the
-base class's type argument is not yet preserved on the subclass. This is tracked by
-[astral-sh/ty#1824](https://github.com/astral-sh/ty/issues/1824) and
-[astral-sh/ty#3676](https://github.com/astral-sh/ty/issues/3676).
+base class's type argument is not yet preserved on the subclass. The extracted attribute is
+therefore `Unknown`, rather than the default `object` specialization that would produce false
+positive errors.
 
 ```py
 from typing import Generic, TypeVar
@@ -844,8 +844,8 @@ class GenericPatternChild(GenericPatternBase[GenericPatternT]):
 def test_match_generic_subclass_capture(value: GenericPatternBase[int]) -> None:
     match value:
         case GenericPatternChild(item=item):
-            # TODO: This should be `int` once the base class's type argument is preserved.
-            reveal_type(item)  # revealed: object
+            # TODO: This should be `int` once generic subclass specialization is supported.
+            reveal_type(item)  # revealed: Unknown
 ```
 
 ## Positional class patterns

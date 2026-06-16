@@ -1470,12 +1470,17 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         kind: &ClassPatternPredicateKind<'db>,
         context: &ClassPatternContext<'db>,
+        original_subject_ty: Type<'db>,
         subject_ty: Type<'db>,
     ) -> Option<Vec<ClassPatternArgument<'db>>> {
         let subject_is_final = subject_ty
             .nominal_class(self.db)
             .is_some_and(|class| class.is_final(self.db));
         let member_type = |name: &Name| {
+            let original_member_ty = original_subject_ty
+                .member(self.db, name.as_str())
+                .place
+                .ignore_possibly_undefined();
             let place = subject_ty.member(self.db, name.as_str()).place;
             let mut member_ty = place.ignore_possibly_undefined();
             if member_ty.is_some_and(|ty| ty.is_never())
@@ -1496,6 +1501,29 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 if !overlapping_member_ty.is_never() {
                     member_ty = Some(overlapping_member_ty);
                 }
+            }
+
+            if original_member_ty.is_none()
+                && member_ty == Some(Type::object())
+                && context.class.is_some_and(|pattern_class| {
+                    pattern_class
+                        .generic_context(self.db)
+                        .and_then(|generic_context| {
+                            pattern_class
+                                .instance_member(
+                                    self.db,
+                                    Some(generic_context.identity_specialization(self.db)),
+                                    name.as_str(),
+                                )
+                                .place
+                                .ignore_possibly_undefined()
+                        })
+                        .is_some_and(|ty| ty.has_typevar(self.db))
+                })
+            {
+                // The pattern subclass's default specialization loses the type arguments from the
+                // subject's generic base. Do not treat its `object` fallback as a declared type.
+                member_ty = Some(Type::unknown());
             }
             member_ty.or_else(|| (!subject_is_final).then_some(Type::unknown()))
         };
@@ -1549,7 +1577,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         self.analyze_pattern_subject_arms(
             subject_ty,
             OriginalSubjectPreservation::EquivalentTypes,
-            |analyzer, _, subject_ty| {
+            |analyzer, original_subject_ty, subject_ty| {
                 let narrowed_subject_ty = analyzer.filter_class_pattern_subject_type(
                     context.class,
                     context.class_ty,
@@ -1562,6 +1590,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 let arguments = analyzer.class_pattern_arguments_for_arm(
                     kind,
                     &context,
+                    original_subject_ty,
                     narrowed_subject_ty,
                 )?;
                 let mut matched_subject_ty = narrowed_subject_ty;
