@@ -82,6 +82,55 @@ impl<'db> Type<'db> {
     }
 }
 
+#[derive(Default)]
+struct ConstrainedTypeVarCollector<'db> {
+    typevars: RefCell<SmallVec<[BoundTypeVarInstance<'db>; 2]>>,
+    recursion_guard: TypeCollector<'db>,
+}
+
+impl<'db> TypeVisitor<'db> for ConstrainedTypeVarCollector<'db> {
+    fn should_visit_lazy_type_attributes(&self) -> bool {
+        false
+    }
+
+    fn visit_bound_type_var_type(&self, db: &'db dyn Db, typevar: BoundTypeVarInstance<'db>) {
+        if typevar.typevar(db).constraints(db).is_some()
+            && !self
+                .typevars
+                .borrow()
+                .iter()
+                .any(|existing| existing.is_same_typevar_as(db, typevar))
+        {
+            self.typevars.borrow_mut().push(typevar);
+        }
+    }
+
+    fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
+        if let Some(specialization) = alias.specialization(db) {
+            for ty in specialization.types(db) {
+                self.visit_type(db, *ty);
+            }
+        }
+    }
+
+    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+    }
+}
+
+/// Collect the constrained type variables contained in `ty`.
+///
+/// Generic alias arguments are included, but lazy alias bodies and type-variable bounds are not.
+/// Each bound type variable appears at most once in the result.
+pub(crate) fn constrained_typevars_in_type<'db>(
+    db: &'db dyn Db,
+    ty: Type<'db>,
+) -> SmallVec<[BoundTypeVarInstance<'db>; 2]> {
+    let collector = ConstrainedTypeVarCollector::default();
+    collector.visit_type(db, ty);
+    collector.typevars.into_inner()
+}
+
 /// A specific instance of a type variable that has not been bound to a generic context yet.
 ///
 /// This is usually not the type that you want; if you are working with a typevar, in a generic

@@ -12,12 +12,11 @@ use crate::types::callable::{CallableFunctionProvenance, CallableTypeKind};
 use crate::types::equality::{evaluate_type_equality, is_same_enum_domain};
 use crate::types::signatures::CallableSignature;
 use crate::types::tuple::TupleType;
-use crate::types::visitor::any_over_type;
 use crate::types::{
     CallableType, ClassBase, ClassLiteral, EnumLiteralType, IntersectionBuilder, KnownClass,
     Parameter, Parameters, Signature, SpecialFormType, Type, TypeContext,
-    TypeVarBoundOrConstraints, TypedDictType, UnionType, binding_type, equality_truthiness,
-    infer_same_file_expression_type,
+    TypeVarBoundOrConstraints, TypedDictType, UnionType, binding_type,
+    constrained_typevars_in_type, equality_truthiness, infer_same_file_expression_type,
 };
 
 pub(crate) fn singleton_pattern_type(db: &dyn Db, singleton: ast::Singleton) -> Type<'_> {
@@ -548,16 +547,11 @@ pub(crate) fn definite_match_pattern_type_for_subject<'db>(
         );
     }
 
-    let has_constrained_typevar = any_over_type(
-        db,
-        resolved_subject_ty,
-        false,
-        |ty| matches!(ty, Type::TypeVar(typevar) if typevar.typevar(db).constraints(db).is_some()),
-    );
-    let filtering_subject_ty = if has_constrained_typevar {
-        resolved_subject_ty.flatten_typevars(db)
-    } else {
+    let constrained_typevars = constrained_typevars_in_type(db, resolved_subject_ty);
+    let filtering_subject_ty = if constrained_typevars.is_empty() {
         resolved_subject_ty
+    } else {
+        resolved_subject_ty.flatten_typevars(db)
     };
     if filtering_subject_ty != resolved_subject_ty {
         let definite_ty = definite_match_pattern_type_for_subject(db, kind, filtering_subject_ty);

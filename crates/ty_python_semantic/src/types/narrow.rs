@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, btree_map::Entry as BTreeEntry, hash_map::Entry};
 
 use crate::Db;
@@ -16,8 +15,8 @@ use crate::types::{
     BoundTypeVarInstance, CallableType, ClassBase, ClassLiteral, ClassPatternPositionalSource,
     ClassType, IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType,
     LiteralValueTypeKind, Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner,
-    SubclassOfType, Truthiness, Type, TypeAliasType, TypeContext, TypeVarBoundOrConstraints,
-    UnionBuilder, callable_pattern_type, class_pattern_positional_sources,
+    SubclassOfType, Truthiness, Type, TypeContext, TypeVarBoundOrConstraints, UnionBuilder,
+    callable_pattern_type, class_pattern_positional_sources, constrained_typevars_in_type,
     definite_match_pattern_type_for_subject, exact_sequence_pattern_type, infer_expression_types,
     mapping_pattern_type, pattern_fallthrough_type, sequence_pattern_type_builder,
     singleton_pattern_type, starred_sequence_pattern_type, typed_dict_matches_class_pattern,
@@ -43,7 +42,7 @@ use super::equality::{
     equality_exclusion_constraint, equality_truthiness, evaluate_type_equality,
     evaluate_type_inequality,
 };
-use super::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
+use super::visitor::TypeCollector;
 use itertools::Itertools;
 use ruff_python_ast as ast;
 use ruff_python_ast::{BoolOp, ExprBoolOp};
@@ -290,22 +289,31 @@ struct PatternTypeVarChildState<'db> {
 }
 
 #[derive(Default)]
-struct ConstrainedTypeVarCollector<'db> {
-    typevars: RefCell<SmallVec<[BoundTypeVarInstance<'db>; 2]>>,
+struct TestedConstrainedTypeVarCollector<'db> {
+    typevars: SmallVec<[BoundTypeVarInstance<'db>; 2]>,
     recursion_guard: TypeCollector<'db>,
 }
 
-impl<'db> ConstrainedTypeVarCollector<'db> {
+impl<'db> TestedConstrainedTypeVarCollector<'db> {
     /// Visit type variables that directly determine which runtime value a pattern tests.
-    fn visit_tested_subject_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+    fn visit(&mut self, db: &'db dyn Db, ty: Type<'db>) {
         if self.recursion_guard.type_was_already_seen(ty) {
             return;
         }
         match ty {
-            Type::TypeVar(typevar) => self.visit_bound_type_var_type(db, typevar),
+            Type::TypeVar(typevar) => {
+                if typevar.typevar(db).constraints(db).is_some()
+                    && !self
+                        .typevars
+                        .iter()
+                        .any(|existing| existing.is_same_typevar_as(db, typevar))
+                {
+                    self.typevars.push(typevar);
+                }
+            }
             Type::Union(union) => {
                 for element in union.elements(db) {
-                    self.visit_tested_subject_type(db, *element);
+                    self.visit(db, *element);
                 }
             }
             Type::Intersection(intersection) => {
@@ -314,7 +322,7 @@ impl<'db> ConstrainedTypeVarCollector<'db> {
                     .iter()
                     .chain(intersection.negative(db))
                 {
-                    self.visit_tested_subject_type(db, *element);
+                    self.visit(db, *element);
                 }
             }
             Type::TypeAlias(_) => {}
@@ -323,58 +331,25 @@ impl<'db> ConstrainedTypeVarCollector<'db> {
     }
 }
 
-impl<'db> TypeVisitor<'db> for ConstrainedTypeVarCollector<'db> {
-    fn should_visit_lazy_type_attributes(&self) -> bool {
-        false
-    }
-
-    fn visit_bound_type_var_type(&self, db: &'db dyn Db, typevar: BoundTypeVarInstance<'db>) {
-        if typevar.typevar(db).constraints(db).is_some()
-            && !self
-                .typevars
-                .borrow()
-                .iter()
-                .any(|existing| existing.is_same_typevar_as(db, typevar))
-        {
-            self.typevars.borrow_mut().push(typevar);
-        }
-    }
-
-    fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
-        if let Some(specialization) = alias.specialization(db) {
-            for ty in specialization.types(db) {
-                self.visit_type(db, *ty);
-            }
-        }
-    }
-
-    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
-        walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
-    }
-}
-
 const MAX_CONSTRAINED_TYPEVAR_EXPANSIONS: usize = 64;
 
 impl<'db> PatternTypeVarEvidence<'db> {
     fn for_subject(db: &'db dyn Db, subject_ty: Type<'db>, tested: bool) -> Self {
-        if !subject_ty.has_typevar(db) {
+        let observed = constrained_typevars_in_type(db, subject_ty);
+        if observed.is_empty() {
             return Self::default();
         }
 
-        let observed = ConstrainedTypeVarCollector::default();
-        observed.visit_type(db, subject_ty);
         let tested_typevars = if tested {
-            let tested = ConstrainedTypeVarCollector::default();
-            tested.visit_tested_subject_type(db, subject_ty);
-            tested.typevars.into_inner()
+            let mut tested = TestedConstrainedTypeVarCollector::default();
+            tested.visit(db, subject_ty);
+            tested.typevars
         } else {
             SmallVec::new()
         };
 
         Self {
             entries: observed
-                .typevars
-                .into_inner()
                 .into_iter()
                 .map(|typevar| {
                     let tested = tested_typevars
