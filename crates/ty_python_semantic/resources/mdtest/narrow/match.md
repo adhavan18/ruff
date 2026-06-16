@@ -821,6 +821,24 @@ def two_child_tests_narrow_subject(value: CorrelatedPair[CorrelatedT]) -> None:
             # revealed: CorrelatedPair[CorrelatedT@two_child_tests_narrow_subject] & CorrelatedPair[CorrelatedA]
             reveal_type(value)
 
+def later_class_alias_keeps_positive_constraint(
+    value: CorrelatedPair[CorrelatedT],
+) -> CorrelatedPair[CorrelatedB]:
+    match value:
+        case CorrelatedPair(CorrelatedA(), CorrelatedA()):
+            raise ValueError
+        case CorrelatedPair(CorrelatedB(), CorrelatedB()) as whole:
+            return whole
+
+def later_sequence_alias_keeps_positive_constraint(
+    value: tuple[CorrelatedT, CorrelatedT],
+) -> tuple[CorrelatedB, CorrelatedB]:
+    match value:
+        case [CorrelatedA(), CorrelatedA()]:
+            raise ValueError
+        case [CorrelatedB(), CorrelatedB()] as whole:
+            return whole
+
 def mapping_siblings_share_one_constraint(value: dict[str, CorrelatedT]) -> CorrelatedB:
     match value:
         case {"left": CorrelatedA() as item, "right": CorrelatedB()}:
