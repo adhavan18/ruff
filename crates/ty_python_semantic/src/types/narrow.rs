@@ -17,10 +17,10 @@ use crate::types::{
     LiteralValueTypeKind, Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner,
     SubclassOfType, Truthiness, Type, TypeContext, TypeVarBoundOrConstraints, UnionBuilder,
     callable_pattern_type, class_pattern_positional_sources, constrained_typevars_in_type,
-    definite_match_pattern_type_for_subject, exact_sequence_pattern_type, infer_expression_types,
-    expand_constrained_typevars, mapping_pattern_type, pattern_fallthrough_type,
-    sequence_pattern_type_builder, singleton_pattern_type,
-    starred_sequence_pattern_type, typed_dict_matches_class_pattern,
+    contains_constrained_typevar, definite_match_pattern_type_for_subject,
+    exact_sequence_pattern_type, expand_constrained_typevars, infer_expression_types,
+    mapping_pattern_type, pattern_fallthrough_type, sequence_pattern_type_builder,
+    singleton_pattern_type, starred_sequence_pattern_type, typed_dict_matches_class_pattern,
 };
 use ty_python_core::expression::Expression;
 use ty_python_core::frozen::FrozenMap;
@@ -1656,7 +1656,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             db: self.db,
             scope: self.scope,
             purpose: self.purpose,
-            tracks_typevar_evidence: !constrained_typevars_in_type(self.db, subject_ty).is_empty(),
+            tracks_typevar_evidence: contains_constrained_typevar(self.db, subject_ty),
         };
         analyzer.analyze_successful_pattern_with_observed_subject(pattern, subject_ty, subject_ty)
     }

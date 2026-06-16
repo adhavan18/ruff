@@ -86,6 +86,7 @@ impl<'db> Type<'db> {
 struct ConstrainedTypeVarCollector<'db> {
     typevars: RefCell<SmallVec<[BoundTypeVarInstance<'db>; 2]>>,
     recursion_guard: TypeCollector<'db>,
+    stop_after_first: bool,
 }
 
 impl<'db> TypeVisitor<'db> for ConstrainedTypeVarCollector<'db> {
@@ -114,8 +115,24 @@ impl<'db> TypeVisitor<'db> for ConstrainedTypeVarCollector<'db> {
     }
 
     fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        if self.stop_after_first && !self.typevars.borrow().is_empty() {
+            return;
+        }
         walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
     }
+}
+
+/// Return whether `ty` contains a constrained type variable.
+///
+/// This follows the same traversal rules as [`constrained_typevars_in_type`], but stops after the
+/// first match.
+pub(crate) fn contains_constrained_typevar<'db>(db: &'db dyn Db, ty: Type<'db>) -> bool {
+    let collector = ConstrainedTypeVarCollector {
+        stop_after_first: true,
+        ..ConstrainedTypeVarCollector::default()
+    };
+    collector.visit_type(db, ty);
+    !collector.typevars.into_inner().is_empty()
 }
 
 /// Collect the constrained type variables contained in `ty`.

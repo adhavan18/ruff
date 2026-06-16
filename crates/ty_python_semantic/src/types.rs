@@ -99,7 +99,8 @@ pub use crate::types::typevar::{
     TypeVarKind, TypeVarNonce,
 };
 pub(crate) use crate::types::typevar::{
-    constrained_typevars_in_type, expand_constrained_typevars, flatten_constrained_typevars,
+    constrained_typevars_in_type, contains_constrained_typevar, expand_constrained_typevars,
+    flatten_constrained_typevars,
 };
 pub use crate::types::variance::TypeVarVariance;
 use crate::types::variance::VarianceInferable;
