@@ -40,7 +40,8 @@ use super::UnionType;
 use super::call::CallArguments;
 use super::enums::{enum_member_literals, enum_metadata};
 use super::equality::{
-    equality_exclusion_constraint, evaluate_type_equality, evaluate_type_inequality,
+    equality_exclusion_constraint, equality_truthiness, evaluate_type_equality,
+    evaluate_type_inequality,
 };
 use itertools::Itertools;
 use ruff_python_ast as ast;
@@ -1633,8 +1634,8 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             let key_ty = key_ty.resolve_type_alias(self.db);
             let typed_dict_key_ty = typed_dict.key_type(self.db);
             if typed_dict_key_ty.is_never()
-                || evaluate_type_equality(self.db, typed_dict_key_ty, key_ty, true)
-                    == Some(Type::Never)
+                || equality_truthiness(self.db, typed_dict_key_ty, key_ty)
+                    == Truthiness::AlwaysFalse
             {
                 return None;
             }
