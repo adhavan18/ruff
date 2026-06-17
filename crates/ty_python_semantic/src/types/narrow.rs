@@ -1297,7 +1297,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             PatternPredicateKind::Value(value) => {
                 let value_ty =
                     infer_same_file_expression_type(self.db, *value, TypeContext::default());
-                self.evaluate_expr_compare_op(subject_ty, value_ty, None, ast::CmpOp::Eq, true)
+                self.evaluate_expr_compare_op(subject_ty, value_ty, ast::CmpOp::Eq, true)
                     .map(NarrowingConstraint::intersection)
             }
             PatternPredicateKind::Singleton(singleton) => Some(NarrowingConstraint::intersection(
