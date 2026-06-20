@@ -1684,7 +1684,10 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             let class = match base {
                 ClassBase::Class(class) => class,
                 ClassBase::Generic | ClassBase::Protocol => continue,
-                ClassBase::Dynamic(_) | ClassBase::Divergent(_) | ClassBase::TypedDict => {
+                ClassBase::Any
+                | ClassBase::Dynamic(_)
+                | ClassBase::Divergent(_)
+                | ClassBase::TypedDict => {
                     return false;
                 }
             };
