@@ -1628,6 +1628,189 @@ func<CURSOR>_alias()
     }
 
     #[test]
+    fn constructor_references_include_class_and_explicit_calls() {
+        let test = cursor_test(
+            "
+class Foo:
+    def __in<CURSOR>it__(self) -> None:
+        pass
+
+Foo()
+Foo.__init__(object.__new__(Foo))
+",
+        );
+
+        assert_snapshot!(test.references(), @"
+        info[references]: Found 3 references
+         --> main.py:3:9
+          |
+        3 |     def __init__(self) -> None:
+          |         --------
+        4 |         pass
+        5 |
+        6 | Foo()
+          | ---
+        7 | Foo.__init__(object.__new__(Foo))
+          |     --------
+          |
+        ");
+        assert_snapshot!(test.references_without_declaration(), @"
+        info[references]: Found 2 references
+         --> main.py:6:1
+          |
+        6 | Foo()
+          | ---
+        7 | Foo.__init__(object.__new__(Foo))
+          |     --------
+          |
+        ");
+    }
+
+    #[test]
+    fn class_references_keep_class_call_target() {
+        let test = cursor_test(
+            "
+class F<CURSOR>oo:
+    def __init__(self) -> None:
+        pass
+
+Foo()
+",
+        );
+
+        assert_snapshot!(test.references(), @"
+        info[references]: Found 2 references
+         --> main.py:2:7
+          |
+        2 | class Foo:
+          |       ---
+        3 |     def __init__(self) -> None:
+        4 |         pass
+        5 |
+        6 | Foo()
+          | ---
+          |
+        ");
+    }
+
+    #[test]
+    fn constructor_references_include_cross_file_alias_and_inherited_calls() {
+        let test = CursorTest::builder()
+            .source(
+                "model.py",
+                "
+class Box:
+    def __in<CURSOR>it__(self) -> None:
+        pass
+
+class Child(Box):
+    pass
+
+Alias = Box
+",
+            )
+            .source(
+                "caller.py",
+                "
+from model import Alias, Box as ImportedBox, Child
+
+ImportedBox()
+Alias()
+Child()
+",
+            )
+            .build();
+
+        assert_snapshot!(test.references(), @"
+        info[references]: Found 4 references
+         --> caller.py:4:1
+          |
+        4 | ImportedBox()
+          | -----------
+        5 | Alias()
+          | -----
+        6 | Child()
+          | -----
+          |
+         ::: model.py:3:9
+          |
+        3 |     def __init__(self) -> None:
+          |         --------
+          |
+        ");
+    }
+
+    #[test]
+    fn new_references_include_class_call() {
+        let test = cursor_test(
+            "
+class Foo:
+    def __ne<CURSOR>w__(cls):
+        return super().__new__(cls)
+
+Foo()
+",
+        );
+
+        assert_snapshot!(test.references(), @"
+        info[references]: Found 2 references
+         --> main.py:3:9
+          |
+        3 |     def __new__(cls):
+          |         -------
+        4 |         return super().__new__(cls)
+        5 |
+        6 | Foo()
+          | ---
+          |
+        ");
+    }
+
+    #[test]
+    fn constructor_reference_non_goals() {
+        for (case, source, expected_references) in [
+            (
+                "assigned constructor implementation",
+                "
+class Foo:
+    def constr<CURSOR>uct(self) -> None: pass
+    __init__ = construct
+
+Foo()
+",
+                2,
+            ),
+            (
+                "implicit __call__ invocation",
+                "
+class Callable:
+    def __ca<CURSOR>ll__(self) -> None: pass
+
+Callable()()
+",
+                1,
+            ),
+            (
+                "cursor on call parentheses",
+                "
+class Foo:
+    def __init__(self) -> None: pass
+
+Foo(<CURSOR>)
+",
+                0,
+            ),
+        ] {
+            let test = cursor_test(source);
+            let actual_references =
+                find_references(&test.db, test.cursor.file, test.cursor.offset, true)
+                    .map_or(0, |references| references.len());
+
+            assert_eq!(actual_references, expected_references, "{case}");
+        }
+    }
+
+    #[test]
     fn import_alias() {
         let test = CursorTest::builder()
             .source(
