@@ -747,6 +747,39 @@ fn sequence_pattern_binding_fallthrough_type<'db>(
     subject_ty: Type<'db>,
 ) -> Type<'db> {
     let resolved = subject_ty.resolve_type_alias(db);
+    // Exact tuples are immutable. Apply fallthrough to the complete type so intersections retain
+    // their negative constraints and repeated constrained TypeVars retain their correlations.
+    let is_exact_tuple_domain = resolved.exact_tuple_instance_spec(db).is_some()
+        || match resolved {
+            Type::Intersection(intersection) => intersection
+                .positive(db)
+                .iter()
+                .any(|positive| positive.exact_tuple_instance_spec(db).is_some()),
+            _ => false,
+        }
+        || resolved.as_typevar().is_some_and(|typevar| {
+            typevar
+                .typevar(db)
+                .constraints(db)
+                .is_some_and(|constraints| {
+                    constraints.iter().all(|constraint| {
+                        constraint
+                            .resolve_type_alias(db)
+                            .exact_tuple_instance_spec(db)
+                            .is_some()
+                    })
+                })
+        });
+    if is_exact_tuple_domain {
+        let narrowed =
+            pattern_fallthrough_type(db, &PatternPredicateKind::Sequence(kind.clone()), resolved);
+        return if narrowed == resolved {
+            subject_ty
+        } else {
+            narrowed
+        };
+    }
+
     let narrowed = match resolved {
         Type::Union(union) => union.map(db, |element| {
             sequence_pattern_binding_fallthrough_type(db, kind, *element)
@@ -761,9 +794,6 @@ fn sequence_pattern_binding_fallthrough_type<'db>(
             }) =>
         {
             Type::Never
-        }
-        _ if resolved.exact_tuple_instance_spec(db).is_some() => {
-            pattern_fallthrough_type(db, &PatternPredicateKind::Sequence(kind.clone()), resolved)
         }
         // An irrefutable sequence pattern can only fail if the subject is not eligible for sequence
         // matching. Unlike length and indexed-element facts, eligibility is unaffected by mutation.
