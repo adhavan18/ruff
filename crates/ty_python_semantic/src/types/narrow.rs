@@ -18,8 +18,8 @@ use crate::types::{
     Type, TypeContext, TypeVarBoundOrConstraints, UnionBuilder, callable_pattern_type,
     class_pattern_positional_sources, definite_match_pattern_type_for_subject,
     exact_sequence_pattern_type, infer_expression_types, mapping_pattern_type,
-    pattern_binding_fallthrough_type, pattern_fallthrough_type, sequence_pattern_type_builder,
-    singleton_pattern_type, starred_sequence_pattern_type, typed_dict_matches_class_pattern,
+    pattern_fallthrough_type, sequence_pattern_type_builder, singleton_pattern_type,
+    starred_sequence_pattern_type, typed_dict_matches_class_pattern,
 };
 use ty_python_core::expression::Expression;
 use ty_python_core::frozen::FrozenMap;
@@ -1961,12 +1961,17 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         subject_ty: Type<'db>,
     ) -> PatternSuccessResult<'db> {
         let target_len = Self::sequence_pattern_target_len(kind);
+        let sequence_ty = if self.infers_bindings() {
+            sequence_pattern_type_builder(self.db).build()
+        } else {
+            necessary_sequence_pattern_type(self.db, kind)
+        };
         self.analyze_pattern_subject_arms(
             subject_ty,
             OriginalSubjectPreservation::TypeVariablesOnly,
             |analyzer, _, subject_ty| {
                 let (narrowed_subject_ty, element_types) =
-                    analyzer.sequence_pattern_arm(subject_ty, target_len)?;
+                    analyzer.sequence_pattern_arm(subject_ty, target_len, sequence_ty)?;
                 let mut bindings = BTreeMap::new();
                 let mut matched_element_types = Vec::with_capacity(kind.patterns.len());
                 let mut binding_element_types = analyzer
@@ -2073,9 +2078,9 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         &self,
         subject_ty: Type<'db>,
         target_len: TupleLength,
+        sequence_ty: Type<'db>,
     ) -> Option<(Type<'db>, Vec<Type<'db>>)> {
-        let narrowed_subject_ty =
-            self.intersect_types(subject_ty, sequence_pattern_type_builder(self.db).build());
+        let narrowed_subject_ty = self.intersect_types(subject_ty, sequence_ty);
         if narrowed_subject_ty.is_never() {
             return None;
         }
@@ -3311,21 +3316,21 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 .evaluate_match_pattern_sequence_for_subject_element(elements, kind, false, None);
         }
 
-        let subject_ty = infer_same_file_expression_type(self.db, subject, TypeContext::default());
         let Some(subject_place) = PlaceExpr::try_from_expr(subject_node) else {
             return PatternNarrowingResult::Possible(None);
         };
 
-        let narrowed_ty = pattern_binding_fallthrough_type(self.db, pattern, subject_ty);
-        if narrowed_ty == subject_ty {
+        let subject_ty = infer_same_file_expression_type(self.db, subject, TypeContext::default());
+        let sequence_type = definite_match_pattern_type_for_subject(self.db, pattern, subject_ty);
+        if sequence_type.is_never() {
             return PatternNarrowingResult::Possible(None);
         }
+        let constraint = NarrowingConstraint::intersection(sequence_type.negate(self.db));
 
         let place = self.expect_place(&subject_place);
 
         PatternNarrowingResult::Possible(Some(NarrowingConstraints::from_iter([(
-            place,
-            NarrowingConstraint::replacement(narrowed_ty),
+            place, constraint,
         )])))
     }
 
