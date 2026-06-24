@@ -1189,10 +1189,11 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             PatternPredicateKind::Singleton(singleton) => PatternNarrowingResult::Possible(
                 self.evaluate_negative_match_pattern_singleton(subject, *singleton),
             ),
-            PatternPredicateKind::Class(_) | PatternPredicateKind::Mapping(_) =>
+            PatternPredicateKind::Class(_) | PatternPredicateKind::Mapping(_) => {
                 PatternNarrowingResult::Possible(
                     self.evaluate_negative_match_pattern(subject, pattern_predicate_kind),
-                ),
+                )
+            }
             PatternPredicateKind::Sequence(kind) => {
                 self.evaluate_negative_match_pattern_sequence(subject, kind, pattern_predicate_kind)
             }
