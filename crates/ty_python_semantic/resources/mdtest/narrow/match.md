@@ -474,9 +474,9 @@ def test_ordered_or_alias_excludes_cross_type_equal_values(
 
 ## Ordered `or`-pattern bindings
 
-Alternatives are tried from left to right, but a later alternative must keep any value for which an
-earlier pattern can fail. Here, `Values.x` is only an annotation, so `HasX()` can fail at runtime
-and the sequence alternative can still bind the value:
+Alternatives are tried from left to right. Under the static member model, the declaration of
+`Values.x` makes the protocol pattern exhaustive, so the later sequence alternative cannot
+contribute to the binding:
 
 ```py
 from typing import Protocol, runtime_checkable
@@ -488,10 +488,10 @@ class HasX(Protocol):
 class Values(list[str]):
     x: int
 
-def test_or_binding_keeps_values_that_can_fail_a_class_pattern(value: Values) -> None:
+def test_or_binding_omits_values_consumed_by_a_class_pattern(value: Values) -> None:
     match value:
         case (HasX() as item) | [item]:
-            reveal_type(item)  # revealed: Values | str
+            reveal_type(item)  # revealed: Values
 ```
 
 Class and mapping child bindings combine with bindings from other alternatives:
@@ -951,8 +951,8 @@ def test_match_class_or_pattern_filters_union_members(
 
 ## Ordered class pattern alternatives
 
-Alternatives are tried from left to right. Looking up an attribute on the first alternative can fail
-for a subclass, so the later alternative can still bind the subject itself:
+`OrderedBase.member` is definitely bound on `OrderedChild`, so the first alternative consumes the
+complete subject and the later alternative cannot contribute to the binding:
 
 ```py
 class OrderedBase:
@@ -960,12 +960,12 @@ class OrderedBase:
 
 class OrderedChild(OrderedBase): ...
 
-def test_match_ordered_class_alternatives_preserve_later_bindings(
+def test_match_ordered_class_alternatives_remove_later_bindings(
     value: OrderedChild,
 ) -> None:
     match value:
         case OrderedBase(member=item) | (OrderedChild() as item):
-            reveal_type(item)  # revealed: int | OrderedChild
+            reveal_type(item)  # revealed: int
 ```
 
 An argumentless class pattern cannot fail after its class check. If it matches the entire subject
