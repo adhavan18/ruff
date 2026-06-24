@@ -5738,6 +5738,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         call_expression_tcx: TypeContext<'db>,
     ) -> Result<(), CallErrorKind> {
         let db = self.db();
+        // Constraint sets are immutable once constructed, so one arena can safely intern and
+        // memoize the repeated operations from narrowing and every fixpoint round of this call.
         let constraints = ConstraintSetBuilder::new();
         let baseline_argument_types = argument_types.clone();
 
@@ -5792,6 +5794,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     &baseline_argument_types,
                     infer_argument_ty,
                     &speculative_bindings,
+                    &constraints,
                     narrowed_tcx,
                 );
                 None
@@ -5801,6 +5804,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     &mut speculative_argument_types,
                     infer_argument_ty,
                     &mut speculative_bindings,
+                    &constraints,
                     narrowed_tcx,
                     &generic_argument_indices,
                 )
@@ -5873,6 +5877,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 argument_types,
                 infer_argument_ty,
                 bindings,
+                &constraints,
                 call_expression_tcx,
                 &generic_argument_indices,
             ) {
@@ -5888,6 +5893,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 &baseline_argument_types,
                 infer_argument_ty,
                 bindings,
+                &constraints,
                 call_expression_tcx,
             );
         }
@@ -5920,6 +5926,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         argument_types: &mut CallArguments<'_, 'db>,
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         bindings: &mut Bindings<'db>,
+        constraints: &ConstraintSetBuilder<'db>,
         call_expression_tcx: TypeContext<'db>,
         generic_argument_indices: &[usize],
     ) -> Option<Result<(), CallErrorKind>> {
@@ -5932,6 +5939,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let mut round_inference_contexts = self.collect_call_argument_inference_contexts(
             &context_argument_types,
             bindings,
+            constraints,
             call_expression_tcx,
         );
 
@@ -5957,10 +5965,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
 
             let mut next_bindings = bindings.clone();
-            let constraints = ConstraintSetBuilder::new();
             let checked_result = next_bindings.check_types_impl(
                 db,
-                &constraints,
+                constraints,
                 &next_argument_types,
                 call_expression_tcx,
                 &self.dataclass_field_specifiers,
@@ -5969,6 +5976,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             let next_inference_contexts = self.collect_call_argument_inference_contexts(
                 &next_argument_types,
                 &next_bindings,
+                constraints,
                 call_expression_tcx,
             );
             if round_inference_contexts.equal_at(&next_inference_contexts, generic_argument_indices)
@@ -5995,6 +6003,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         &self,
         argument_types: &CallArguments<'_, 'db>,
         bindings: &'bindings Bindings<'db>,
+        constraints: &ConstraintSetBuilder<'db>,
         call_expression_tcx: TypeContext<'db>,
     ) -> CallArgumentInferenceContexts<'db> {
         fn add_overloads_from_binding<'a, 'db>(
@@ -6021,7 +6030,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
 
         let db = self.db();
-        let constraints = ConstraintSetBuilder::new();
         let mut overloads_with_binding: Vec<(&Binding<'db>, &CallableBinding<'db>)> = Vec::new();
         bindings.visit_type_context_callables(&mut |binding| {
             add_overloads_from_binding(&mut overloads_with_binding, binding);
@@ -6046,7 +6054,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     |overload: &'bindings Binding<'db>, binding: &CallableBinding<'db>| {
                         overload.argument_type_context(
                             db,
-                            &constraints,
+                            constraints,
                             binding,
                             argument_types,
                             argument_index,
@@ -6229,11 +6237,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         context_argument_types: &CallArguments<'_, 'db>,
         infer_argument_ty: &mut dyn FnMut(&mut Self, ArgExpr<'db, '_>) -> Type<'db>,
         bindings: &'bindings Bindings<'db>,
+        constraints: &ConstraintSetBuilder<'db>,
         call_expression_tcx: TypeContext<'db>,
     ) {
         let inference_contexts = self.collect_call_argument_inference_contexts(
             context_argument_types,
             bindings,
+            constraints,
             call_expression_tcx,
         );
         self.infer_all_argument_types_with_contexts(
