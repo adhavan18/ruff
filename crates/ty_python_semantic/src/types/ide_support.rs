@@ -1148,6 +1148,31 @@ pub fn find_active_signature_from_details(
     Some(best_index)
 }
 
+/// Returns the definitions of every callable signature that matches this call.
+///
+/// Unlike [`resolved_call_signature`], this does not choose an arity-based fallback for an invalid
+/// call or collapse ambiguous matches to one signature.
+pub fn matching_call_definitions<'db>(
+    model: &SemanticModel<'db>,
+    call_expr: &ast::ExprCall,
+) -> Vec<Definition<'db>> {
+    let db = model.db();
+    let Some(callable_type) = call_expr
+        .func
+        .inferred_type(model)
+        .and_then(|ty| ty.try_upcast_to_callable(db))
+        .map(|callable| callable.into_type(db))
+    else {
+        return Vec::new();
+    };
+
+    full_type_bindings_for_call(model, callable_type, call_expr)
+        .iter_flat()
+        .flat_map(|binding| binding.matching_overloads().map(|(_, overload)| overload))
+        .filter_map(|binding| binding.signature.definition)
+        .collect()
+}
+
 /// Resolve a call expression to its matching overload's signature details,
 /// using full type checking (not just arity matching) for overload resolution.
 ///
@@ -1367,6 +1392,26 @@ mod resolve_definition {
                 ResolvedDefinition::Module(_) | ResolvedDefinition::FileWithRange(_) => None,
             }
         }
+
+        /// Returns `true` if this definition is an `@overload` declaration.
+        pub fn is_overload_declaration(&self, db: &'db dyn Db) -> bool {
+            let ResolvedDefinition::Definition(definition) = self else {
+                return false;
+            };
+
+            binding_type(db, *definition)
+                .as_function_literal()
+                .is_some_and(|function| function.overloads_and_implementation(db).1.is_none())
+        }
+
+        /// Returns the single concrete implementation associated with this overload declaration.
+        pub fn overload_implementation(&self, db: &'db dyn Db) -> Option<Self> {
+            let ResolvedDefinition::Definition(definition) = self else {
+                return None;
+            };
+
+            overload_implementation(db, *definition).map(ResolvedDefinition::Definition)
+        }
     }
 
     // Overload declarations often omit docstrings, while the runtime
@@ -1407,6 +1452,44 @@ mod resolve_definition {
             .last()?;
 
         implementation.definition(db).docstring(db)
+    }
+
+    fn overload_implementation<'db>(
+        db: &'db dyn Db,
+        definition: Definition<'db>,
+    ) -> Option<Definition<'db>> {
+        let DefinitionKind::Function(_) = definition.kind(db) else {
+            return None;
+        };
+
+        let name = definition.name(db)?;
+        let scope = definition.scope(db);
+        let symbol_id = place_table(db, scope).symbol_id(&name)?;
+        let use_def = use_def_map(db, scope);
+        let current_overload = binding_type(db, definition)
+            .as_function_literal()?
+            .literal(db)
+            .last_definition;
+        if !current_overload.is_overload(db) {
+            return None;
+        }
+
+        let mut implementations = use_def
+            .end_of_scope_symbol_bindings(symbol_id)
+            .filter_map(|binding| {
+                let function =
+                    binding_type(db, binding.binding.definition()?).as_function_literal()?;
+                function
+                    .contains_definition(db, definition)
+                    .then_some(function)
+            })
+            .filter_map(|function| {
+                let (_, implementation) = function.overloads_and_implementation(db);
+                implementation?.signature(db).definition()
+            });
+        let implementation = implementations.next()?;
+        // Conditional bindings can expose multiple implementations for one symbol.
+        implementations.next().is_none().then_some(implementation)
     }
 
     /// Resolve import definitions to their targets.
