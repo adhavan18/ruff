@@ -317,7 +317,16 @@ impl<'db> EnumValueSet<'db> {
             }
         }
 
-        let enum_class = enum_class?;
+        Self::from_included(enum_class?, included)
+    }
+
+    fn from_included(
+        enum_class: EnumClassLiteral<'db>,
+        included: FxOrderMap<&'db Name, bool>,
+    ) -> Option<Self> {
+        if included.is_empty() {
+            return None;
+        }
         let members = if included.len() == 1 {
             let (name, promotable) = included.into_iter().next()?;
             EnumValueSetMembers::One { name, promotable }
@@ -522,21 +531,18 @@ impl<'db> EnumDomainSet<'db> {
             ty: Type<'db>,
             domains: &mut Vec<EnumValueSet<'db>>,
         ) -> Option<()> {
-            match ty.resolve_type_alias(db) {
-                Type::Union(union) => {
-                    for element in union.elements(db) {
-                        collect(db, *element, domains)?;
-                    }
-                }
-                ty => domains.push(EnumValueSet::from_type(db, ty)?),
+            if let Some(domain) = EnumValueSet::from_type(db, ty) {
+                domains.push(domain);
+                return Some(());
+            }
+
+            let Type::Union(union) = ty.resolve_type_alias(db) else {
+                return None;
+            };
+            for element in union.elements(db) {
+                collect(db, *element, domains)?;
             }
             Some(())
-        }
-
-        if let Some(domain) = EnumValueSet::from_type(db, ty) {
-            return Some(Self {
-                domains: vec![domain],
-            });
         }
 
         let mut domains = Vec::new();
@@ -639,8 +645,10 @@ impl<'db> ProjectedEnumComparison<'db> {
     fn truthiness(&self, operator: ComparisonOperator) -> Truthiness {
         let equality = if !self.left_projection.may_overlap(&self.right_projection) {
             Truthiness::AlwaysFalse
-        } else if self.left_projection.single_key().is_some()
-            && self.left_projection.single_key() == self.right_projection.single_key()
+        } else if let (Some(left), Some(right)) = (
+            self.left_projection.single_key(),
+            self.right_projection.single_key(),
+        ) && left == right
         {
             Truthiness::AlwaysTrue
         } else {
@@ -765,8 +773,7 @@ impl<'db> EnumValueSet<'db> {
         operator: ComparisonOperator,
         projection: &mut EnumKeyProjection<'db>,
     ) -> Option<()> {
-        let profile: &'db EnumClassKeyProfile<'db> =
-            enum_class_key_profile(db, self.enum_class, operator);
+        let profile = enum_class_key_profile(db, self.enum_class, operator);
         let semantics = profile.semantics?;
         let key_domain = EnumComparisonKeyDomain::new(self.enum_class, semantics);
 
@@ -801,8 +808,7 @@ impl<'db> EnumValueSet<'db> {
         operator: ComparisonOperator,
         keys: &FxHashSet<EnumComparisonKey<'db>>,
     ) -> Result<Option<Self>, ()> {
-        let profile: &'db EnumClassKeyProfile<'db> =
-            enum_class_key_profile(db, self.enum_class, operator);
+        let profile = enum_class_key_profile(db, self.enum_class, operator);
         let semantics = profile.semantics.ok_or(())?;
         let mut included = FxOrderMap::default();
         for (name, scalar_key) in &profile.members {
@@ -818,24 +824,12 @@ impl<'db> EnumValueSet<'db> {
                 Self::insert_member(&mut included, name, promotable);
             }
         }
-        if included.is_empty() {
-            return Ok(None);
-        }
         if included.len() == self.member_count(db) && self.is_closed(profile.members_are_exhaustive)
         {
             return Ok(Some(self.clone()));
         }
 
-        let members = if included.len() == 1 {
-            let (name, promotable) = included.into_iter().next().ok_or(())?;
-            EnumValueSetMembers::One { name, promotable }
-        } else {
-            EnumValueSetMembers::Included(included)
-        };
-        Ok(Some(Self {
-            enum_class: self.enum_class,
-            members,
-        }))
+        Ok(Self::from_included(self.enum_class, included))
     }
 }
 
