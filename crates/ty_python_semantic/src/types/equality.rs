@@ -18,8 +18,8 @@ use super::{
 mod enums;
 
 pub(super) use self::enums::enum_membership_constraint;
-use self::enums::evaluate_same_enum_domains;
-pub(super) use self::enums::{EnumComparison, same_enum_comparison};
+use self::enums::evaluate_enum_domains;
+pub(super) use self::enums::{EnumComparison, enum_comparison};
 
 /// The result of evaluating a runtime comparison between two types.
 ///
@@ -149,6 +149,10 @@ pub(super) fn evaluate_type_equality<'db>(
             ComparisonOperator::Equality,
             condition_expects_equality,
         )
+    })
+    .or_else(|| {
+        evaluate_enum_domains(db, left, right, branch, ComparisonOperator::Equality)
+            .and_then(|result| result.constraint(branch))
     })
     .or_else(|| {
         if comparison_domain(db, left, right, ComparisonOperator::Equality)
@@ -318,7 +322,7 @@ fn evaluate_comparison_once<'db>(
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
 
-    if let Some(result) = evaluate_same_enum_domains(db, left, right, branch, operator) {
+    if let Some(result) = evaluate_enum_domains(db, left, right, branch, operator) {
         return result;
     }
 
@@ -1115,7 +1119,7 @@ impl ComparisonOperator {
 ///
 /// Two types with different known semantics cannot compare equal. Types with custom or otherwise
 /// unknown comparison methods are not assigned a value of this enum.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, salsa::Update, get_size2::GetSize)]
 enum KnownComparisonSemantics {
     Object,
     Int,
