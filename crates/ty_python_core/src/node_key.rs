@@ -1,3 +1,4 @@
+use ruff_index::Idx;
 use ruff_python_ast::{HasNodeIndex, NodeIndex, sub_ast_level};
 
 use crate::ast_node_ref::AstNodeRef;
@@ -95,6 +96,12 @@ impl<V> NodeIndexMap<V> {
     }
 }
 
+impl<V> Default for NodeIndexMap<V> {
+    fn default() -> Self {
+        Self::from_entries(std::iter::empty())
+    }
+}
+
 impl<V> std::ops::Index<NodeIndex> for NodeIndexMap<V> {
     type Output = V;
 
@@ -104,11 +111,50 @@ impl<V> std::ops::Index<NodeIndex> for NodeIndexMap<V> {
     }
 }
 
+/// A node-index map whose index values use 16 bits when every stored index fits.
+#[derive(Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+pub(crate) enum NarrowNodeIndexMap<I> {
+    Narrow(NodeIndexMap<u16>),
+    Wide(NodeIndexMap<I>),
+}
+
+impl<I: Idx> NarrowNodeIndexMap<I> {
+    pub(crate) fn from_entries(entries: impl IntoIterator<Item = (NodeIndex, I)>) -> Self {
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        let narrow = entries
+            .iter()
+            .map(|(index, value)| Some((*index, u16::try_from(value.index()).ok()?)))
+            .collect::<Option<Vec<_>>>();
+        if let Some(narrow) = narrow {
+            Self::Narrow(NodeIndexMap::from_entries(narrow))
+        } else {
+            Self::Wide(NodeIndexMap::from_entries(entries))
+        }
+    }
+
+    pub(crate) fn get(&self, index: NodeIndex) -> Option<I> {
+        match self {
+            Self::Narrow(map) => map.get(index).map(|value| I::new(usize::from(*value))),
+            Self::Wide(map) => map.get(index).copied(),
+        }
+    }
+}
+
+impl<I> Default for NarrowNodeIndexMap<I> {
+    fn default() -> Self {
+        Self::Narrow(NodeIndexMap::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use ruff_index::newtype_index;
     use ruff_python_ast::NodeIndex;
 
-    use super::NodeIndexMap;
+    use super::{NarrowNodeIndexMap, NodeIndexMap};
+
+    #[newtype_index]
+    struct TestId;
 
     #[test]
     fn node_index_map_supports_root_and_sub_ast_indices() {
@@ -120,5 +166,21 @@ mod tests {
         assert_eq!(map.get(root), Some(&"root"));
         assert_eq!(map.get(missing_root), None);
         assert_eq!(map.get(sub_ast), Some(&"sub-AST"));
+    }
+
+    #[test]
+    fn narrow_node_index_map_falls_back_for_wide_values() {
+        let node = NodeIndex::from(1);
+        let narrow =
+            NarrowNodeIndexMap::from_entries([(node, TestId::from_usize(u16::MAX as usize))]);
+        let wide =
+            NarrowNodeIndexMap::from_entries([(node, TestId::from_usize(u16::MAX as usize + 1))]);
+
+        assert!(matches!(narrow, NarrowNodeIndexMap::Narrow(_)));
+        assert!(matches!(wide, NarrowNodeIndexMap::Wide(_)));
+        assert_eq!(
+            wide.get(node),
+            Some(TestId::from_usize(u16::MAX as usize + 1))
+        );
     }
 }
