@@ -839,12 +839,20 @@ class GenericPatternBase(Generic[GenericPatternT]): ...
 
 class GenericPatternChild(GenericPatternBase[GenericPatternT]):
     item: GenericPatternT
+    items: list[GenericPatternT]
 
 def test_match_generic_subclass_capture(value: GenericPatternBase[int]) -> None:
     match value:
         case GenericPatternChild(item=item):
             # TODO: This should be `int` once generic subclass specialization is supported.
             reveal_type(item)  # revealed: Unknown
+
+def test_match_nested_generic_subclass_capture(value: GenericPatternBase[int]) -> list[int]:
+    match value:
+        case GenericPatternChild(items=items):
+            reveal_type(items)  # revealed: Unknown
+            return items
+    return []
 ```
 
 ## Positional class patterns

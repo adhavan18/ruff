@@ -1504,7 +1504,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             }
 
             if original_member_ty.is_none()
-                && member_ty == Some(Type::object())
                 && context.class.is_some_and(|pattern_class| {
                     pattern_class
                         .generic_context(self.db)
@@ -1522,7 +1521,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 })
             {
                 // The pattern subclass's default specialization loses the type arguments from the
-                // subject's generic base. Do not treat its `object` fallback as a declared type.
+                // subject's generic base. Do not treat its fallback as a declared type.
                 member_ty = Some(Type::unknown());
             }
             member_ty.or_else(|| (!subject_is_final).then_some(Type::unknown()))
