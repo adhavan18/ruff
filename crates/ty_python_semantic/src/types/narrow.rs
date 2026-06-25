@@ -38,7 +38,6 @@ use ruff_python_stdlib::identifiers::is_identifier;
 
 use super::UnionType;
 use super::call::CallArguments;
-use super::enums::{enum_member_literals, enum_metadata};
 use super::equality::{
     equality_exclusion_constraint, equality_truthiness, evaluate_type_equality,
     evaluate_type_inequality,
@@ -1687,7 +1686,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 ClassBase::Any
                 | ClassBase::Dynamic(_)
                 | ClassBase::Divergent(_)
-                | ClassBase::TypedDict => {
+                | ClassBase::TypedDict(_) => {
                     return false;
                 }
             };
