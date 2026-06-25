@@ -156,6 +156,7 @@ impl<'db> Type<'db> {
                 Type::TypeAlias(alias) => {
                     non_async_special_case(db, alias.value_type(db))
                 }
+                Type::Recursive(recursive) => non_async_special_case(db, recursive.body(db)),
                 Type::TypeVar(tvar) => match tvar.typevar(db).bound_or_constraints(db)? {
                     TypeVarBoundOrConstraints::UpperBound(bound) => {
                         non_async_special_case(db, bound)

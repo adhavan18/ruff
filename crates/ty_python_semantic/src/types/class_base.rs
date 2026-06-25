@@ -199,6 +199,7 @@ impl<'db> ClassBase<'db> {
             Type::Never => Some(ClassBase::unknown()),
 
             Type::TypeAlias(alias) => Self::try_from_type(db, alias.value_type(db), subclass),
+            Type::Recursive(recursive) => Self::try_from_type(db, recursive.body(db), subclass),
 
             Type::NewTypeInstance(newtype) => {
                 ClassBase::try_from_type(db, newtype.concrete_base_type(db), subclass)

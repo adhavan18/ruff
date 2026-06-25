@@ -208,6 +208,12 @@ impl<'db> Type<'db> {
         };
 
         let truthiness = match self {
+            Type::Recursive(recursive) => visitor.visit(*self, || {
+                recursive
+                    .body(db)
+                    .try_bool_impl(db, allow_short_circuit, visitor)
+            })?,
+
             Type::Dynamic(_)
             | Type::Divergent(_)
             | Type::Never

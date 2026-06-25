@@ -40,6 +40,7 @@ pub(crate) use self::match_pattern::{
     pattern_fallthrough_type, sequence_pattern_type_builder, singleton_pattern_type,
     starred_sequence_pattern_type,
 };
+pub(crate) use self::recursive::{RecursiveOrigin, RecursiveType};
 pub(crate) use self::relation_error::{ErrorContext, ErrorContextTree, ParameterDescription};
 use self::set_theoretic::KnownUnion;
 pub(crate) use self::set_theoretic::builder::{
@@ -146,6 +147,7 @@ pub(crate) mod narrow;
 mod newtype;
 mod overrides;
 mod protocol_class;
+mod recursive;
 pub(crate) mod relation;
 mod relation_error;
 mod set_theoretic;
@@ -903,6 +905,8 @@ pub enum Type<'db> {
     Dynamic(DynamicType<'db>),
     /// A cycle marker used during recursive type inference.
     Divergent(DivergentType),
+    /// A recursive type `mu binder. body`.
+    Recursive(RecursiveType<'db>),
     /// The empty set of values
     Never,
     /// A specific function object
@@ -1048,6 +1052,24 @@ impl<'db> Type<'db> {
 
     pub(crate) fn divergent(id: salsa::Id) -> Self {
         Self::Divergent(DivergentType::new(id))
+    }
+
+    pub(crate) fn recursive(
+        db: &'db dyn Db,
+        binder_id: salsa::Id,
+        origin: RecursiveOrigin<'db>,
+        body: Type<'db>,
+    ) -> Self {
+        RecursiveType::build(db, binder_id, origin, body)
+    }
+
+    #[expect(dead_code, reason = "staged API for recursive type construction")]
+    pub(crate) fn implicit_recursive(
+        db: &'db dyn Db,
+        binder_id: salsa::Id,
+        body: Type<'db>,
+    ) -> Self {
+        Self::recursive(db, binder_id, RecursiveOrigin::Implicit, body)
     }
 
     pub(crate) const fn is_divergent(&self) -> bool {
@@ -1870,9 +1892,10 @@ impl<'db> Type<'db> {
                 NegativeIntersectionElements::Single(*self),
             )),
 
-            Type::Union(_) | Type::Intersection(_) | Type::EnumComplement(_) => {
-                IntersectionBuilder::new(db).add_negative(*self).build()
-            }
+            Type::Union(_)
+            | Type::Intersection(_)
+            | Type::EnumComplement(_)
+            | Type::Recursive(_) => IntersectionBuilder::new(db).add_negative(*self).build(),
         }
     }
 
@@ -1906,6 +1929,7 @@ impl<'db> Type<'db> {
             Type::Intersection(_) => false,
             Type::EnumComplement(complement) => complement.is_spellable(db),
             Type::Divergent(_)
+            | Type::Recursive(_)
             | Type::SpecialForm(_)
             | Type::BoundSuper(_)
             | Type::BoundMethod(_)
@@ -1939,6 +1963,7 @@ impl<'db> Type<'db> {
             Type::Intersection(_)
             | Type::EnumComplement(_)
             | Type::Divergent(_)
+            | Type::Recursive(_)
             | Type::SpecialForm(_)
             | Type::BoundSuper(_)
             | Type::BoundMethod(_)
@@ -2142,6 +2167,7 @@ impl<'db> Type<'db> {
             return None;
         }
         match self {
+            Type::Recursive(_) => Some(self),
             Type::Union(union) => union.recursive_type_normalized_impl(db, div, nested),
             Type::Intersection(intersection) => intersection
                 .recursive_type_normalized_impl(db, div, nested)
@@ -2305,7 +2331,7 @@ impl<'db> Type<'db> {
     /// for more complicated types that are actually singletons.
     pub(crate) fn is_singleton(self, db: &'db dyn Db) -> bool {
         match self {
-            Type::Dynamic(_) | Type::Divergent(_) | Type::Never => false,
+            Type::Dynamic(_) | Type::Divergent(_) | Type::Recursive(_) | Type::Never => false,
 
             Type::LiteralValue(literal) => match literal.kind() {
                 LiteralValueTypeKind::Int(..)
@@ -2498,6 +2524,7 @@ impl<'db> Type<'db> {
 
             Type::Dynamic(_)
             | Type::Divergent(_)
+            | Type::Recursive(_)
             | Type::Never
             | Type::Union(..)
             | Type::AlwaysTruthy
@@ -2556,6 +2583,10 @@ impl<'db> Type<'db> {
             Type::Dynamic(_) if policy.require_concrete() => Some(Place::Undefined.into()),
 
             Type::Dynamic(_) | Type::Divergent(_) | Type::Never => Some(Place::bound(self).into()),
+
+            Type::Recursive(recursive) => recursive
+                .body(db)
+                .find_name_in_mro_with_policy(db, name, policy),
 
             Type::ClassLiteral(class) if class.is_typed_dict(db) => {
                 Some(class.typed_dict_member(db, None, name, policy))
@@ -2866,6 +2897,8 @@ impl<'db> Type<'db> {
             }
 
             Type::Dynamic(_) | Type::Divergent(_) | Type::Never => Place::bound(self).into(),
+
+            Type::Recursive(recursive) => recursive.body(db).instance_member(db, name),
 
             Type::NominalInstance(instance) => instance.class(db).instance_member(db, name),
             Type::NewTypeInstance(newtype) => {
@@ -3601,6 +3634,10 @@ impl<'db> Type<'db> {
                 }
 
                 Type::Dynamic(..) | Type::Divergent(_) | Type::Never => Place::bound(this).into(),
+
+                Type::Recursive(recursive) => recursive
+                    .body(db)
+                    .member_lookup_with_policy_and_receiver(db, name, policy, receiver),
 
                 Type::FunctionLiteral(function) if name == "__get__" => Place::bound(
                     Type::KnownBoundMethod(KnownBoundMethodType::FunctionTypeDunderGet(function)),
@@ -4508,6 +4545,8 @@ impl<'db> Type<'db> {
             Type::Dynamic(_) | Type::Divergent(_) | Type::Never => {
                 Binding::single(self, Signature::dynamic(self)).into()
             }
+
+            Type::Recursive(recursive) => recursive.body(db).bindings(db),
 
             // Note that this correctly returns `None` if none of the union elements are callable.
             Type::Union(union) => Bindings::from_union(
@@ -5611,6 +5650,7 @@ impl<'db> Type<'db> {
                 send_ty: Some(ty),
                 return_ty: Some(ty),
             }),
+            Type::Recursive(recursive) => recursive.body(db).generator_types(db),
             _ => None,
         }
     }
@@ -5629,6 +5669,7 @@ impl<'db> Type<'db> {
     pub(crate) fn to_instance(self, db: &'db dyn Db) -> Option<Type<'db>> {
         match self {
             Type::Dynamic(_) | Type::Divergent(_) | Type::Never => Some(self),
+            Type::Recursive(recursive) => recursive.body(db).to_instance(db),
             Type::ClassLiteral(class) => Some(Type::instance(db, class.default_specialization(db))),
             Type::GenericAlias(alias) => Some(Type::instance(db, ClassType::from(alias))),
             Type::SubclassOf(subclass_of_ty) => Some(subclass_of_ty.to_instance(db)),
@@ -5879,6 +5920,13 @@ impl<'db> Type<'db> {
 
             Type::Dynamic(_) | Type::Divergent(_) => Ok(*self),
 
+            Type::Recursive(recursive) => recursive.body(db).in_type_expression(
+                db,
+                scope_id,
+                typevar_binding_context,
+                inference_flags,
+            ),
+
             Type::NominalInstance(instance) => match instance.known_class(db) {
                 Some(KnownClass::NoneType) => Ok(Type::none(db)),
                 Some(KnownClass::TypeVar) => Ok(todo_type!(
@@ -5961,6 +6009,7 @@ impl<'db> Type<'db> {
             Type::SubclassOf(subclass_of_ty) => subclass_of_ty.to_meta_type(db),
             Type::Dynamic(dynamic) => SubclassOfType::from(db, SubclassOfInner::Dynamic(dynamic)),
             Type::Divergent(_) => self,
+            Type::Recursive(recursive) => recursive.body(db).to_meta_type(db),
             // TODO intersections
             Type::Intersection(intersection) => {
                 if let Some(alternatives) = intersection.finite_alternative_union(db) {
@@ -6409,6 +6458,15 @@ impl<'db> Type<'db> {
                 }
                 _ => self,
             },
+            Type::Recursive(recursive) => visitor.visit(db, self, type_mapping, || {
+                let body = recursive.body(db);
+                let mapped = body.apply_type_mapping_impl(db, type_mapping, tcx, visitor);
+                if mapped == body {
+                    self
+                } else {
+                    Type::recursive(db, recursive.binder_id(db), recursive.origin(db), mapped)
+                }
+            }),
 
             Type::Never
             | Type::AlwaysTruthy
@@ -6491,6 +6549,14 @@ impl<'db> Type<'db> {
                 }
             }
             Type::Divergent(_) => {}
+            Type::Recursive(recursive) => visitor.visit(self, || {
+                recursive.body(db).find_legacy_typevars_impl(
+                    db,
+                    binding_context,
+                    typevars,
+                    visitor,
+                );
+            }),
 
             Type::FunctionLiteral(function) => {
                 visitor.visit(self, || {
@@ -6916,7 +6982,8 @@ impl<'db> Type<'db> {
             Self::AlwaysFalsy => Type::SpecialForm(SpecialFormType::AlwaysFalsy).definition(db),
 
             // These types have no definition
-            Self::Dynamic(
+            Self::Recursive(_)
+            | Self::Dynamic(
                 DynamicType::InvalidConcatenateUnknown | DynamicType::UnspecializedTypeVar,
             )
             | Self::Callable(_)
@@ -7274,6 +7341,7 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
             Type::TypeAlias(alias) => alias.variance_of(db, typevar),
             Type::Dynamic(_)
             | Type::Divergent(_)
+            | Type::Recursive(_)
             | Type::Never
             | Type::WrapperDescriptor(_)
             | Type::KnownBoundMethod(_)

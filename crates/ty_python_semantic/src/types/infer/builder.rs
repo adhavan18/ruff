@@ -2849,6 +2849,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 infer_value_ty,
                 emit_diagnostics,
             ),
+            Type::Recursive(recursive) => self.validate_attribute_assignment(
+                target,
+                recursive.body(db),
+                attribute,
+                infer_value_ty,
+                emit_diagnostics,
+            ),
 
             // Super instances do not allow attribute assignment
             Type::NominalInstance(instance) if instance.has_known_class(db, KnownClass::Super) => {
@@ -3501,6 +3508,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 attribute,
                 emit_diagnostics,
             ),
+            Type::Recursive(recursive) => self.validate_attribute_deletion(
+                target,
+                recursive.body(db),
+                attribute,
+                emit_diagnostics,
+            ),
 
             Type::NominalInstance(..)
             | Type::ProtocolInstance(_)
@@ -3689,6 +3702,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 | Type::TypeForm(_)
                 | Type::TypedDict(_)
                 | Type::NewTypeInstance(_) => object_ty.instance_member(db, attribute),
+                Type::Recursive(recursive) => recursive.body(db).instance_member(db, attribute),
                 Type::ClassLiteral(..) | Type::GenericAlias(..) | Type::SubclassOf(..) => {
                     object_ty.class_object_member(db, attribute, MemberLookupPolicy::default())
                 }
@@ -5498,6 +5512,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 }),
                 Type::TypeAlias(alias) => {
                     propagate_callable_kind(db, alias.value_type(db), kind, provenance)
+                }
+                Type::Recursive(recursive) => {
+                    propagate_callable_kind(db, recursive.body(db), kind, provenance)
                 }
                 // Intersections are currently not handled here because that would require
                 // the decorator to be explicitly annotated as returning an intersection.
@@ -10508,6 +10525,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             (_, Type::TypeAlias(alias)) => {
                 self.infer_unary_expression_type(op, alias.value_type(self.db()), unary)
+            }
+
+            (_, Type::Recursive(recursive)) => {
+                self.infer_unary_expression_type(op, recursive.body(self.db()), unary)
             }
 
             (ast::UnaryOp::UAdd, Type::LiteralValue(literal)) => match literal.kind() {

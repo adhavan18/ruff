@@ -744,6 +744,9 @@ impl<'db> BoundSuperType<'db> {
             Type::TypeAlias(alias) => {
                 return delegate_to(alias.value_type(db));
             }
+            Type::Recursive(recursive) => {
+                return delegate_to(recursive.body(db));
+            }
             Type::TypeVar(bound_typevar) => {
                 let typevar = bound_typevar.typevar(db);
                 match typevar.bound_or_constraints(db) {

@@ -550,6 +550,14 @@ impl<'db> Type<'db> {
                 Some(value_ty.subscript(db, alias.value_type(db), expr_context))
             }
 
+            (Type::Recursive(recursive), _) => {
+                Some(recursive.body(db).subscript(db, slice_ty, expr_context))
+            }
+
+            (_, Type::Recursive(recursive)) => {
+                Some(value_ty.subscript(db, recursive.body(db), expr_context))
+            }
+
             (Type::Union(union), _) => Some(map_union_subscript(db, union, |element| {
                 element.subscript(db, slice_ty, expr_context)
             })),

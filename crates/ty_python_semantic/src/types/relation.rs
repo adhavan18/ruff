@@ -281,6 +281,7 @@ impl<'db> Type<'db> {
              => true,
             Type::Dynamic(_)
             | Type::Divergent(_)
+            | Type::Recursive(_)
             | Type::NominalInstance(_)
             | Type::ProtocolInstance(_)
             | Type::GenericAlias(_)
@@ -1145,6 +1146,18 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (_, Type::TypeAlias(target_alias)) => self.with_recursion_guard(source, target, || {
                 self.check_type_pair(db, source, target_alias.value_type(db))
             }),
+
+            (Type::Recursive(source_recursive), _) => {
+                self.with_recursion_guard(source, target, || {
+                    self.check_type_pair(db, source_recursive.body(db), target)
+                })
+            }
+
+            (_, Type::Recursive(target_recursive)) => {
+                self.with_recursion_guard(source, target, || {
+                    self.check_type_pair(db, source, target_recursive.body(db))
+                })
+            }
 
             // Annotation unions retain type aliases so recursive aliases can be represented.
             // Normalize direct alias elements together before checking the union so reductions
@@ -2553,6 +2566,20 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 let right_alias_ty = alias.value_type(db);
                 self.with_recursion_guard(left, right, || {
                     self.check_type_pair(db, left, right_alias_ty)
+                })
+            }
+
+            (Type::Recursive(recursive), _) => {
+                let left_body = recursive.body(db);
+                self.with_recursion_guard(left, right, || {
+                    self.check_type_pair(db, left_body, right)
+                })
+            }
+
+            (_, Type::Recursive(recursive)) => {
+                let right_body = recursive.body(db);
+                self.with_recursion_guard(left, right, || {
+                    self.check_type_pair(db, left, right_body)
                 })
             }
 
