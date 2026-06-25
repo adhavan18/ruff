@@ -4,7 +4,7 @@ use ruff_diagnostics::{Edit, Fix};
 use rustc_hash::FxHashMap;
 
 use std::borrow::Cow;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::iter;
 use std::rc::Rc;
 use std::time::Duration;
@@ -1076,7 +1076,13 @@ impl<'db> Type<'db> {
         origin: RecursiveOrigin<'db>,
         body: Type<'db>,
     ) -> Self {
-        RecursiveType::build(db, binder_id, origin, body)
+        let marker = Type::divergent(binder_id);
+        if body.contains_cycle_marker(db, marker) {
+            RecursiveType::build(db, binder_id, origin, body)
+        } else {
+            // μa. T => T if T does not contain a.
+            body
+        }
     }
 
     #[expect(dead_code, reason = "staged API for recursive type construction")]
@@ -1086,6 +1092,16 @@ impl<'db> Type<'db> {
         body: Type<'db>,
     ) -> Self {
         Self::recursive(db, binder_id, RecursiveOrigin::Implicit, body)
+    }
+
+    /// One-step unwrapping of a recursive type for finite recursive walkers.
+    ///
+    /// This is not binder-preserving; type operations should use [`RecursiveType::map`] instead.
+    pub(crate) fn unwrap_recursive(self, db: &'db dyn Db) -> Self {
+        match self {
+            Type::Recursive(recursive) => recursive.body(db),
+            _ => self,
+        }
     }
 
     pub(crate) const fn is_divergent(&self) -> bool {
@@ -1106,6 +1122,58 @@ impl<'db> Type<'db> {
             (Type::Divergent(left), Type::Divergent(right)) => left.same_marker(right),
             _ => false,
         }
+    }
+
+    fn is_top_level_cycle_marker(self, db: &'db dyn Db, marker: Type<'db>) -> bool {
+        self.same_divergent_marker(marker)
+            || matches!(
+                self,
+                Type::Recursive(recursive)
+                    if recursive.is_non_contractive(db)
+                        && Type::divergent(recursive.binder_id(db)).same_divergent_marker(marker)
+            )
+    }
+
+    fn contains_cycle_marker(self, db: &'db dyn Db, marker: Type<'db>) -> bool {
+        struct ContainsCycleMarkerVisitor<'db> {
+            marker: Type<'db>,
+            recursion_guard: visitor::TypeCollector<'db>,
+            found: Cell<bool>,
+        }
+
+        impl<'db> visitor::TypeVisitor<'db> for ContainsCycleMarkerVisitor<'db> {
+            fn should_visit_lazy_type_attributes(&self) -> bool {
+                false
+            }
+
+            fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+                if self.found.get() {
+                    return;
+                }
+                if ty.is_top_level_cycle_marker(db, self.marker) {
+                    self.found.set(true);
+                    return;
+                }
+                visitor::walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+            }
+
+            fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
+                let recursive_marker = Type::divergent(recursive.binder_id(db));
+                if recursive_marker.same_divergent_marker(self.marker) {
+                    self.found.set(true);
+                } else {
+                    self.visit_type(db, recursive.body(db));
+                }
+            }
+        }
+
+        let visitor = ContainsCycleMarkerVisitor {
+            marker,
+            recursion_guard: visitor::TypeCollector::default(),
+            found: Cell::new(false),
+        };
+        visitor::TypeVisitor::visit_type(&visitor, db, self);
+        visitor.found.get()
     }
 
     /// If `self` is a materialized `Divergent` type, returns the concrete type it should
@@ -2174,6 +2242,15 @@ impl<'db> Type<'db> {
     /// For other types, the decision depends on whether they are interpreted as nominal or structural.
     /// For example, `KnownInstanceType::UnionType` should simply send `nested` as is.
     fn recursive_type_normalized_impl(
+        self,
+        db: &'db dyn Db,
+        div: Type<'db>,
+        nested: bool,
+    ) -> Option<Self> {
+        self.recursive_type_normalized_impl_preserving_top_level_recursive(db, div, nested)
+    }
+
+    fn recursive_type_normalized_impl_preserving_top_level_recursive(
         self,
         db: &'db dyn Db,
         div: Type<'db>,
@@ -7721,6 +7798,10 @@ impl DivergentType {
             id,
             materialization: None,
         }
+    }
+
+    pub(crate) const fn id(self) -> salsa::Id {
+        self.id
     }
 
     fn same_marker(self, other: Self) -> bool {

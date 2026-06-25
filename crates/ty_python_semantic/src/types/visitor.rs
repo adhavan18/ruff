@@ -16,7 +16,6 @@ use crate::{
         known_instance::walk_known_instance_type,
         method::{walk_bound_method_type, walk_method_wrapper_type},
         newtype::{NewType, walk_newtype_instance_type},
-        recursive::walk_recursive_type,
         set_theoretic::{walk_intersection_type, walk_union},
         subclass_of::walk_subclass_of_type,
         type_alias::walk_type_alias_type,
@@ -133,9 +132,7 @@ pub(crate) trait TypeVisitor<'db> {
         walk_newtype_instance_type(db, newtype, self);
     }
 
-    fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
-        walk_recursive_type(db, recursive, self);
-    }
+    fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: RecursiveType<'db>) {}
 }
 
 /// Enumeration of types that may contain other types, such as unions, intersections, and generics.

@@ -202,7 +202,7 @@ impl<'db> RecursiveType<'db> {
     fn fold(self, db: &'db dyn Db, unfolded_result: Type<'db>) -> Type<'db> {
         let marker = Type::divergent(self.binder_id(db));
         unfolded_result
-            .recursive_type_normalized_impl(db, marker, false)
+            .recursive_type_normalized_impl_preserving_top_level_recursive(db, marker, false)
             .unwrap_or(marker)
     }
 
@@ -221,20 +221,13 @@ impl<'db> RecursiveType<'db> {
     }
 }
 
-pub(super) fn walk_recursive_type<'db, V: crate::types::visitor::TypeVisitor<'db> + ?Sized>(
-    db: &'db dyn Db,
-    recursive: RecursiveType<'db>,
-    visitor: &V,
-) {
-    recursive.map(db, |unfolded| visitor.visit_type(db, unfolded));
-}
-
 #[cfg(test)]
 mod tests {
     use ruff_python_ast as ast;
 
     use super::*;
     use crate::db::tests::setup_db;
+    use crate::types::visitor;
 
     #[test]
     fn map_folds_operation_result_back_to_recursive_type() {
@@ -253,5 +246,30 @@ mod tests {
         });
 
         assert_eq!(element, recursive_ty);
+    }
+
+    #[test]
+    fn recursive_constructor_simplifies_unused_binder() {
+        let db = setup_db();
+        let binder_id = salsa::plumbing::Id::from_bits(1);
+        let body = Type::homogeneous_tuple(&db, Type::int_literal(1));
+
+        assert_eq!(
+            Type::recursive(&db, binder_id, RecursiveOrigin::Implicit, body),
+            body
+        );
+    }
+
+    #[test]
+    fn default_visitors_do_not_unfold_recursive_types() {
+        let db = setup_db();
+        let binder_id = salsa::plumbing::Id::from_bits(1);
+        let body = Type::homogeneous_tuple(&db, Type::divergent(binder_id));
+        let recursive_ty = Type::recursive(&db, binder_id, RecursiveOrigin::Implicit, body);
+        let unfolded_once = Type::homogeneous_tuple(&db, recursive_ty);
+
+        assert!(!visitor::any_over_type(&db, recursive_ty, false, |ty| {
+            ty == unfolded_once
+        }));
     }
 }
