@@ -9015,7 +9015,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             Ok(()) => bindings,
             Err(_) => {
                 bindings.report_diagnostics(&self.context, call_expression.into());
-                return bindings.return_type(self.db());
+                return bindings
+                    .return_type(self.db())
+                    .forget_collection_cardinality(self.db());
             }
         };
 
@@ -9128,14 +9130,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
         }
 
-        if let Some(instance_ty) = self.infer_builtin_collection_instance_type(
-            callable_type,
-            arguments,
-            bindings.return_type(self.db()),
-        ) {
-            bindings = bindings.with_constructed_instance_type(self.db(), instance_ty);
-        }
-
         // `range(...)` always constructs a `range`, but with literal arguments we can preserve
         // whether that range is statically non-empty on the constructed instance itself.
         if let Some(instance_ty) =
@@ -9146,7 +9140,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let db = self.db();
         let scope = self.scope();
-        let return_ty = bindings.return_type(db);
+        // A call can mutate an argument or receiver and return it through `Self` or a type variable.
+        // Forget cardinality recursively, then restore it for calls whose behavior we model.
+        let return_ty = bindings.return_type(db).forget_collection_cardinality(db);
+        let return_ty = self
+            .infer_builtin_collection_instance_type(callable_type, arguments, return_ty)
+            .unwrap_or(return_ty);
 
         let find_narrowed_place = |argument_index: usize| match arguments.args.get(argument_index) {
             None => {
