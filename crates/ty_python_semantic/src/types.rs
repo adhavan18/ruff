@@ -103,6 +103,7 @@ use crate::types::visitor::any_over_type;
 use crate::{Db, FxOrderSet, Program};
 pub(crate) use class::{ClassLiteral, ClassType, GenericAlias, StaticClassLiteral};
 pub use class::{KnownClass, MethodDecorator};
+pub(crate) use instance::CollectionCardinality;
 use instance::Protocol;
 pub use instance::{NominalInstanceType, ProtocolInstanceType};
 pub(crate) use literal::{
@@ -4157,6 +4158,10 @@ impl<'db> Type<'db> {
             }
         }
 
+        if self.exact_collection_cardinality(db) == Some(CollectionCardinality::Empty) {
+            return Some(Type::int_literal(0));
+        }
+
         let return_ty = match self.try_call_dunder(
             db,
             "__len__",
@@ -6048,7 +6053,31 @@ impl<'db> Type<'db> {
                 .unwrap_or_else(Type::unknown);
         }
 
+        if let Type::NominalInstance(instance) = self
+            && instance.is_exact()
+        {
+            return Type::ClassLiteral(instance.class_literal(db));
+        }
+
         self.to_meta_type(db)
+    }
+
+    /// Return this type's single known runtime class, if subclasses are excluded.
+    pub(crate) fn exact_runtime_class(self, db: &'db dyn Db) -> Option<ClassLiteral<'db>> {
+        // Let relation checking decompose these types before querying their runtime class. In
+        // particular, resolving a recursive type alias here would bypass the relation visitor's
+        // cycle guard.
+        if matches!(
+            self,
+            Type::TypeAlias(_) | Type::Union(_) | Type::Intersection(_) | Type::EnumComplement(_)
+        ) {
+            return None;
+        }
+
+        match self.dunder_class(db) {
+            Type::ClassLiteral(class) => Some(class),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -6188,6 +6217,18 @@ impl<'db> Type<'db> {
             )
         {
             return SubclassOfType::from(db, class.default_specialization(db));
+        }
+
+        // Cardinality is invalidated only for the stored value and values reachable through its
+        // data shape. It must not erase refinements in unrelated metadata such as a stored
+        // function's return type.
+        if matches!(type_mapping, TypeMapping::ForgetCollectionCardinality)
+            && !matches!(
+                self,
+                Type::NominalInstance(_) | Type::Union(_) | Type::Intersection(_)
+            )
+        {
+            return self;
         }
 
         match self {
@@ -6433,6 +6474,7 @@ impl<'db> Type<'db> {
                 TypeMapping::Materialize(_) |
                 TypeMapping::ReplaceParameterDefaults |
                 TypeMapping::EagerExpansion |
+                TypeMapping::ForgetCollectionCardinality |
                 TypeMapping::RescopeReturnCallables(_) |
                 TypeMapping::Promote(PromotionMode::Off, _) |
                 TypeMapping::Promote(
@@ -6452,6 +6494,7 @@ impl<'db> Type<'db> {
                 TypeMapping::Promote(..) |
                 TypeMapping::ReplaceParameterDefaults |
                 TypeMapping::EagerExpansion |
+                TypeMapping::ForgetCollectionCardinality |
                 TypeMapping::RescopeReturnCallables(_) => self,
                 TypeMapping::Materialize(materialization_kind) => match materialization_kind {
                     MaterializationKind::Top => Type::object(),
@@ -7513,6 +7556,9 @@ pub enum TypeMapping<'a, 'db> {
     /// In the case of recursive type aliases, this will diverge, so that part will be replaced with `Divergent`.
     EagerExpansion,
 
+    /// Erase definite cardinality refinements from mutable builtin collections.
+    ForgetCollectionCardinality,
+
     /// Updates any `Callable` types in a function signature return type to be generic if possible.
     RescopeReturnCallables(&'a FxHashMap<CallableType<'db>, CallableType<'db>>),
 }
@@ -7559,6 +7605,7 @@ impl<'db> TypeMapping<'_, 'db> {
             | TypeMapping::Materialize(_)
             | TypeMapping::ReplaceParameterDefaults
             | TypeMapping::EagerExpansion
+            | TypeMapping::ForgetCollectionCardinality
             | TypeMapping::RescopeReturnCallables(_) => context,
             TypeMapping::BindSelf(binding) => {
                 if binding.binding_context().is_some() {
@@ -7605,6 +7652,7 @@ impl<'db> TypeMapping<'_, 'db> {
             | TypeMapping::ReplaceSelf { .. }
             | TypeMapping::ReplaceParameterDefaults
             | TypeMapping::EagerExpansion
+            | TypeMapping::ForgetCollectionCardinality
             | TypeMapping::RescopeReturnCallables(_) => self.clone(),
         }
     }
