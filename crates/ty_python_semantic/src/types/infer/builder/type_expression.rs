@@ -1729,7 +1729,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             Type::Dynamic(DynamicType::UnknownGeneric(_)) => {
                 self.infer_explicit_type_alias_specialization(subscript, value_ty, true)
             }
-            Type::Dynamic(_) | Type::Divergent(_) => {
+            Type::Dynamic(_) | Type::Divergent(_) | Type::Recursive(_) => {
                 // Infer slice as a value expression to avoid false-positive
                 // `invalid-type-form` diagnostics, when we have e.g.
                 // `MyCallable[[int, str], None]` but `MyCallable` is dynamic.
@@ -2286,7 +2286,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     let narrowed = self.infer_type_expression(arguments_slice);
                     let expanded = narrowed.expand_eagerly(self.db());
 
-                    if expanded.is_divergent() {
+                    if expanded.is_cycle_artifact(db) {
                         expanded
                     } else {
                         TypeIsType::from_type_expression(self.db(), narrowed)
