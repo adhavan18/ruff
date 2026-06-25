@@ -1147,15 +1147,23 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 self.check_type_pair(db, source, target_alias.value_type(db))
             }),
 
+            (Type::Recursive(source_recursive), _) if source_recursive.is_non_contractive(db) => {
+                self.check_type_pair(db, Type::divergent(source_recursive.binder_id(db)), target)
+            }
+
             (Type::Recursive(source_recursive), _) => {
                 self.with_recursion_guard(source, target, || {
-                    self.check_type_pair(db, source_recursive.body(db), target)
+                    source_recursive.map(db, |unfolded| self.check_type_pair(db, unfolded, target))
                 })
+            }
+
+            (_, Type::Recursive(target_recursive)) if target_recursive.is_non_contractive(db) => {
+                self.check_type_pair(db, source, Type::divergent(target_recursive.binder_id(db)))
             }
 
             (_, Type::Recursive(target_recursive)) => {
                 self.with_recursion_guard(source, target, || {
-                    self.check_type_pair(db, source, target_recursive.body(db))
+                    target_recursive.map(db, |unfolded| self.check_type_pair(db, source, unfolded))
                 })
             }
 
@@ -2569,19 +2577,21 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 })
             }
 
-            (Type::Recursive(recursive), _) => {
-                let left_body = recursive.body(db);
-                self.with_recursion_guard(left, right, || {
-                    self.check_type_pair(db, left_body, right)
-                })
+            (Type::Recursive(recursive), _) if recursive.is_non_contractive(db) => {
+                self.check_type_pair(db, Type::divergent(recursive.binder_id(db)), right)
             }
 
-            (_, Type::Recursive(recursive)) => {
-                let right_body = recursive.body(db);
-                self.with_recursion_guard(left, right, || {
-                    self.check_type_pair(db, left, right_body)
-                })
+            (Type::Recursive(recursive), _) => self.with_recursion_guard(left, right, || {
+                recursive.map(db, |unfolded| self.check_type_pair(db, unfolded, right))
+            }),
+
+            (_, Type::Recursive(recursive)) if recursive.is_non_contractive(db) => {
+                self.check_type_pair(db, left, Type::divergent(recursive.binder_id(db)))
             }
+
+            (_, Type::Recursive(recursive)) => self.with_recursion_guard(left, right, || {
+                recursive.map(db, |unfolded| self.check_type_pair(db, left, unfolded))
+            }),
 
             (Type::EnumComplement(complement), other) => {
                 self.check_type_pair(db, complement.remaining_literal_union(db), other)

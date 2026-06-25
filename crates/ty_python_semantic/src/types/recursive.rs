@@ -1,9 +1,16 @@
-//! Core representation for recursive types.
+//! Core representation and operations for recursive types.
+//!
+//! A recursive type is represented as `mu binder. body`, where recursive
+//! references inside `body` are `Type::Divergent` markers carrying `binder`.
+//! Structural operations on a recursive type must not use the raw body directly:
+//! they should unfold one layer, perform the operation, and fold the resulting
+//! type back under the same binder.
 
 use salsa::plumbing::AsId;
 
 use crate::Db;
-use crate::types::{Type, TypeAliasType};
+use crate::place::PlaceAndQualifiers;
+use crate::types::{Type, TypeAliasType, TypeContext, TypeMapping};
 
 /// Identifier for the bound variable of a recursive type.
 ///
@@ -35,7 +42,6 @@ pub enum RecursiveOrigin<'db> {
 }
 
 impl<'db> RecursiveOrigin<'db> {
-    #[expect(dead_code, reason = "staged API for recursive type construction")]
     pub(crate) fn source_type(self) -> Option<Type<'db>> {
         match self {
             Self::Implicit => None,
@@ -55,7 +61,7 @@ impl<'db> RecursiveOrigin<'db> {
 
     #[expect(dead_code, reason = "staged API for recursive type construction")]
     pub(crate) fn contains_in_type(self, db: &'db dyn Db, ty: Type<'db>) -> bool {
-        crate::types::visitor::any_over_type(db, ty, true, |inner| self.matches_type(db, inner))
+        crate::types::visitor::any_over_type(db, ty, false, |inner| self.matches_type(db, inner))
     }
 
     #[expect(dead_code, reason = "staged API for recursive type construction")]
@@ -63,9 +69,78 @@ impl<'db> RecursiveOrigin<'db> {
         match self {
             Self::Implicit => None,
             Self::TypeAlias(TypeAliasType::PEP695(alias)) => Some(alias.as_id()),
-            Self::TypeAlias(TypeAliasType::ManualPEP695(alias)) => {
-                Some(alias.definition(db).as_id())
-            }
+            Self::TypeAlias(alias) => Some(alias.definition(db).as_id()),
+        }
+    }
+}
+
+pub(crate) trait Foldable<'db>: Sized {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self;
+}
+
+impl<'db> Foldable<'db> for Type<'db> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        rec.fold(db, self)
+    }
+}
+
+impl<'db> Foldable<'db> for () {
+    fn fold(self, _db: &'db dyn Db, _rec: RecursiveType<'db>) -> Self {}
+}
+
+impl<'db> Foldable<'db> for bool {
+    fn fold(self, _db: &'db dyn Db, _rec: RecursiveType<'db>) -> Self {
+        self
+    }
+}
+
+impl<'db> Foldable<'db> for usize {
+    fn fold(self, _db: &'db dyn Db, _rec: RecursiveType<'db>) -> Self {
+        self
+    }
+}
+
+impl<'db> Foldable<'db> for PlaceAndQualifiers<'db> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        self.map_type(|ty| rec.fold(db, ty))
+    }
+}
+
+impl<'db, F: Foldable<'db>> Foldable<'db> for Option<F> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        self.map(|inner| inner.fold(db, rec))
+    }
+}
+
+impl<'db, F: Foldable<'db>> Foldable<'db> for Box<F> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        Box::new((*self).fold(db, rec))
+    }
+}
+
+impl<'db, F: Foldable<'db>> Foldable<'db> for Box<[F]> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        self.into_vec()
+            .into_iter()
+            .map(|inner| inner.fold(db, rec))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+}
+
+impl<'db, F: Foldable<'db>> Foldable<'db> for Vec<F> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        self.into_iter()
+            .map(|inner| inner.fold(db, rec))
+            .collect::<Vec<_>>()
+    }
+}
+
+impl<'db, T: Foldable<'db>, E: Foldable<'db>> Foldable<'db> for Result<T, E> {
+    fn fold(self, db: &'db dyn Db, rec: RecursiveType<'db>) -> Self {
+        match self {
+            Ok(ok) => Ok(ok.fold(db, rec)),
+            Err(err) => Err(err.fold(db, rec)),
         }
     }
 }
@@ -81,7 +156,6 @@ pub struct RecursiveType<'db> {
 // The Salsa heap is tracked separately.
 impl get_size2::GetSize for RecursiveType<'_> {}
 
-#[salsa::tracked]
 impl<'db> RecursiveType<'db> {
     pub(crate) fn build(
         db: &'db dyn Db,
@@ -95,6 +169,56 @@ impl<'db> RecursiveType<'db> {
     pub(crate) fn binder_id(self, db: &'db dyn Db) -> salsa::Id {
         self.binder(db).into_id()
     }
+
+    /// Returns the body with recursive-position markers replaced by the source type when known.
+    ///
+    /// This is for finite views such as display. Structural type operations should use
+    /// [`map`](Self::map), which preserves recursive positions as this recursive type.
+    pub fn body_with_origin_marker(self, db: &'db dyn Db) -> Type<'db> {
+        let body = self.body(db);
+        let Some(replacement) = self.origin(db).source_type() else {
+            return body;
+        };
+        let mapping = TypeMapping::ReplaceDivergent {
+            binder_id: self.binder(db),
+            replacement,
+        };
+        body.apply_type_mapping(db, &mapping, TypeContext::default())
+    }
+
+    fn unfold(self, db: &'db dyn Db) -> Type<'db> {
+        let body = self.body(db);
+        let replacement = self
+            .origin(db)
+            .source_type()
+            .unwrap_or(Type::Recursive(self));
+        let mapping = TypeMapping::ReplaceDivergent {
+            binder_id: self.binder(db),
+            replacement,
+        };
+        body.apply_type_mapping(db, &mapping, TypeContext::default())
+    }
+
+    fn fold(self, db: &'db dyn Db, unfolded_result: Type<'db>) -> Type<'db> {
+        let marker = Type::divergent(self.binder_id(db));
+        unfolded_result
+            .recursive_type_normalized_impl(db, marker, false)
+            .unwrap_or(marker)
+    }
+
+    /// Apply an operation to one unfolded layer, then fold the result back under this binder.
+    pub(crate) fn map<F: Foldable<'db>>(
+        self,
+        db: &'db dyn Db,
+        operation: impl FnOnce(Type<'db>) -> F,
+    ) -> F {
+        operation(self.unfold(db)).fold(db, self)
+    }
+
+    /// Whether this recursive type is the non-contractive `mu a. a`.
+    pub(crate) fn is_non_contractive(self, db: &'db dyn Db) -> bool {
+        self.body(db) == Type::divergent(self.binder_id(db))
+    }
 }
 
 pub(super) fn walk_recursive_type<'db, V: crate::types::visitor::TypeVisitor<'db> + ?Sized>(
@@ -102,5 +226,32 @@ pub(super) fn walk_recursive_type<'db, V: crate::types::visitor::TypeVisitor<'db
     recursive: RecursiveType<'db>,
     visitor: &V,
 ) {
-    visitor.visit_type(db, recursive.body(db));
+    recursive.map(db, |unfolded| visitor.visit_type(db, unfolded));
+}
+
+#[cfg(test)]
+mod tests {
+    use ruff_python_ast as ast;
+
+    use super::*;
+    use crate::db::tests::setup_db;
+
+    #[test]
+    fn map_folds_operation_result_back_to_recursive_type() {
+        let db = setup_db();
+        let binder_id = salsa::plumbing::Id::from_bits(1);
+        let body = Type::homogeneous_tuple(&db, Type::divergent(binder_id));
+        let recursive_ty = Type::recursive(&db, binder_id, RecursiveOrigin::Implicit, body);
+        let Type::Recursive(recursive) = recursive_ty else {
+            panic!("expected recursive type");
+        };
+
+        let element = recursive.map(&db, |unfolded| {
+            unfolded
+                .subscript(&db, Type::int_literal(0), ast::ExprContext::Load)
+                .expect("tuple subscript should succeed")
+        });
+
+        assert_eq!(element, recursive_ty);
+    }
 }
