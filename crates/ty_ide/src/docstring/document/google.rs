@@ -410,6 +410,8 @@ fn google_parameter_names(display_name: &str) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
+
     use super::{SectionKind, parameter_documentation, visit_sections};
 
     #[test]
@@ -571,7 +573,7 @@ Summary.
     Args:
         value: Parameter documentation.",
         ] {
-            let parameters = super::super::parameter_documentation(raw, Default::default());
+            let parameters = super::super::parameter_documentation(raw, IndexMap::default());
 
             assert_eq!(parameters.len(), 1, "{raw}");
             assert_eq!(
